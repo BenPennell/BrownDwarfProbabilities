@@ -1,0 +1,6 @@
+{
+    "gaiamock_path": "../BHPopulation/gaiamock",
+    "data_path": "./data",
+    "temp_path": "./temp",
+    "wrapperlitepath": "../GridGenerator"
+}
