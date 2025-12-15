@@ -3,6 +3,7 @@ import emcee
 import multiprocessing
 import datetime
 import pickle
+import matplotlib.pyplot as plt
 
 try:
     # for Jupyter
@@ -172,7 +173,7 @@ def compute_grid(target_object, sc_cubes, period_boundaries, m_boundaries, q_spa
     return fully_rescaled_cube
         
 ### --- ###
-def compute_grids(objects, sc_cubes, period_boundaries, m_boundaries, q_space=False):
+def compute_grids(objects, sc_cubes, period_boundaries, m_boundaries, q_space=False, verbose=True):
     '''
         wrapper for compute_grid() (above)
     '''
@@ -180,9 +181,13 @@ def compute_grids(objects, sc_cubes, period_boundaries, m_boundaries, q_space=Fa
     
     # for every object, first map to the scaled down period resolution
     # then, map it into m2-space, trimming the irrelevant m2s
-    for target_object in tqdm(objects):
+    if verbose:
+        pbar = tqdm(total=len(objects))
+    for target_object in objects:
         fully_rescaled_cube = compute_grid(target_object, sc_cubes, period_boundaries, m_boundaries, q_space=q_space)
         grids.append(fully_rescaled_cube.ravel())
+        if verbose:
+            pbar.update(1)
     
     return grids   
 
@@ -201,11 +206,13 @@ def area_in_range(target_range, mu, sigma, resolution=100):
     return np.trapezoid(y=ys, x=xs)
 
 ### --- ###
-def create_model_cube(grid_shape, p_mu, p_si, p_range=(1,8), m2_range=(0.017,0.2)):
+def create_model_cube(grid_shape, p_model=None, p_range=(1,8), m2_range=(0.017,0.2)):
     '''
         flat m2 distribution, for now
     '''
-    return np.ones(grid_shape)/(grid_shape[0]*grid_shape[1])
+    if p_model is None:
+        return np.ones(grid_shape)/(grid_shape[0]*grid_shape[1])
+    p_mu, p_si = p_model
     period_count = grid_shape[0]
     p_vals = np.linspace(*p_range, period_count+1)
     p_dist = np.zeros(period_count)
@@ -214,7 +221,9 @@ def create_model_cube(grid_shape, p_mu, p_si, p_range=(1,8), m2_range=(0.017,0.2
         p_dist[i] = area_in_range((p_vals[i],p_vals[i+1]), p_mu, p_si, resolution=period_count*5) / total_area
     
     model_cube = np.tile(p_dist, [grid_shape[1], 1]) # (q,T)
-    return np.swapaxes(model_cube, 0, 1) # want (T,q) shape
+    model_cube = np.swapaxes(model_cube, 0, 1) # want (T,q) shape
+    model_cube = model_cube / model_cube.sum() # should sum to 1 actually
+    return model_cube
 
 ### --- ###
 def softmax(logits):
@@ -267,13 +276,16 @@ class popsampler():
     def __init__(self, sc_cubes, catalogue, p_boundaries=None, m_boundaries=None, model_cube=None):
         self.sc_cubes = sc_cubes
         self.catalogue = catalogue
-        self.sampler = None
         
         # for grid parameters
         self.p_boundaries = p_boundaries
         self.m_boundaries = m_boundaries
         # for imposed models
         self.model_cube = model_cube
+        # for the results
+        self.sampler = None
+        self.fbs = None
+        self.likelihoods = None
 
     ### --- ###
     def constrain_parameters(self, step_count=30, nwalkers=50, initialisation_weight=1e-2, cutoff=np.exp(-18)):
@@ -316,19 +328,14 @@ class popsampler():
         sampler.run_mcmc(initial_params, step_count, progress=True, skip_initial_state_check=True)
         print("Complete!")
         self.sampler = sampler
-        
-    ### --- ###
-    def constrain_binarity(self, step_count=1000, nwalkers=3, p_range=(1,8), m_range=(0.017,0.2), cutoff=np.exp(-18)):
-        '''
-            this is nonsense because it's one parameter lmao
-        '''
-        temp_kwargs = dict()
-        temp_kwargs["cutoff"] = cutoff
-        
-        print("Reducing catalogue...")
+    
+    def reduce_catalogue(self, catalogue=None):
+        temp_catalogue = self.catalogue
+        if catalogue is not None:
+            temp_catalogue = catalogue
         working_catalogue = []
-        soltypes = np.zeros(len(self.catalogue), dtype=np.int8)
-        for i, target_object in enumerate(self.catalogue):
+        soltypes = np.zeros(len(temp_catalogue), dtype=np.int8)
+        for i, target_object in enumerate(temp_catalogue):
             # save just parallax and mass for grid conversion
             reduced_object = {
                 "parallax": target_object["parallax"],
@@ -340,58 +347,103 @@ class popsampler():
             # save just solution type for use at inference
             soltypes[i] = target_object["solution_type"] 
         working_catalogue = np.array(working_catalogue)
-
-        # precompute the q-L mappings for all the objects
-        print("Computing grids...")
-        p_boundaries = np.linspace(*p_range, self.model_cube.shape[0]+1)[1:-1]
-        m_boundaries = np.linspace(*m_range, self.model_cube.shape[1]+1)[1:-1]
-        grids = np.array(compute_grids(working_catalogue, self.sc_cubes, p_boundaries, m_boundaries))
-        # run mcmc
-        print("Running markov chains...")
-        args = (soltypes, grids, self.model_cube)
-        self.sampler = None
-        initial_params = np.random.rand(nwalkers, 1) 
-        pool = multiprocessing.Pool()
-        sampler = emcee.EnsembleSampler(nwalkers, 1, calculate_log_likelihood, 
-                                    args=args, kwargs=temp_kwargs, pool=pool)
-        sampler.run_mcmc(initial_params, step_count, progress=True, skip_initial_state_check=True)
-        print("Complete!")
-        self.sampler = sampler
+        return working_catalogue, soltypes
     
-    def binarity(self, resolution=250, p_range=(1,8), q_range=(0.05,0.5), cutoff=np.exp(-18)):
+    def assign_grids(self, working_catalogue, p_range, q_range, verbose=True):
+        p_boundaries = np.linspace(*p_range, self.model_cube.shape[0]+1)[1:-1]
+        q_boundaries = np.linspace(*q_range, self.model_cube.shape[1]+1)[1:-1]
+        grids = np.array(compute_grids(working_catalogue, self.sc_cubes, p_boundaries, q_boundaries, q_space=True, verbose=verbose))
+        return grids
+    
+    def binarity(self, resolution=250, p_range=(1,8), q_range=(0.05,0.5), cutoff=np.exp(-18), grids=None, catalogue=None, model_cube=None, verbose=True):
         '''
             binarity likelihood across fb
         '''        
-        print("Reducing catalogue...")
-        working_catalogue = []
-        soltypes = np.zeros(len(self.catalogue), dtype=np.int8)
-        for i, target_object in enumerate(self.catalogue):
-            # save just parallax and mass for grid conversion
-            reduced_object = {
-                "parallax": target_object["parallax"],
-                "mass": target_object["mass"],
-                "soltype_index": SOLUTION_TYPES.index(target_object["solution_type"])
-            }
-            working_catalogue.append(reduced_object)
-            
-            # save just solution type for use at inference
-            soltypes[i] = target_object["solution_type"] 
-        working_catalogue = np.array(working_catalogue)
-
-        # precompute the q-L mappings for all the objects
-        print("Computing grids...")
-        p_boundaries = np.linspace(*p_range, self.model_cube.shape[0]+1)[1:-1]
-        q_boundaries = np.linspace(*q_range, self.model_cube.shape[1]+1)[1:-1]
-        grids = np.array(compute_grids(working_catalogue, self.sc_cubes, p_boundaries, q_boundaries, q_space=True))
+        if verbose:
+            print("Reducing catalogue...")
+        working_catalogue, soltypes = self.reduce_catalogue(catalogue=catalogue)
         
-        print("Computing likelihoods...")
+        working_model_cube = self.model_cube
+        if model_cube is not None:
+            working_model_cube = model_cube
+        # precompute the q-L mappings for all the objects
+        if grids is None:
+            if verbose:
+                print("Computing grids...")
+            grids = self.assign_grids(working_catalogue, p_range, q_range, verbose=verbose)
+        
+        if verbose:
+            print("Computing likelihoods...")
         fbs = np.linspace(0.02,0.98,resolution)
         likelihoods = np.zeros(resolution)
-        for i in tqdm(range(resolution)):
-            likelihoods[i] = calculate_log_likelihood([fbs[i]], soltypes, grids, self.model_cube, cutoff=cutoff)
-        
-        return fbs, likelihoods            
+        if verbose:
+            pbar = tqdm(total=resolution)
+        for i in range(resolution):
+            likelihoods[i] = calculate_log_likelihood([fbs[i]], soltypes, grids, working_model_cube, cutoff=cutoff)
+            if verbose:
+                pbar.update(1)
+
+        self.fbs = fbs
+        self.likelihoods = likelihoods
+        return fbs, likelihoods
     
+    def binarity_precomputations(self, p_range=(1,8), q_range=(0.05,0.5)):
+        working_catalogue, _ = self.reduce_catalogue()
+        grids = self.assign_grids(working_catalogue, p_range, q_range)
+        return working_catalogue, grids
+        
+    def binarity_binned_mass(self, model_cube, working_catalogue, grids, mass_lims, p_range=(1,8), q_range=(0.05,0.5), **kwargs):        
+        constraining_results = np.zeros((len(mass_lims), 3))
+        for i in tqdm(range(len(mass_lims))):
+            temp_grids = []
+            temp_catalogue = []
+            for j, obj in enumerate(working_catalogue):
+                obj["solution_type"] = [0,5,7,9,12][obj["soltype_index"]]
+                if i == 0:
+                    if obj["mass"] < mass_lims[0]:
+                        temp_catalogue.append(obj)
+                        temp_grids.append(grids[j])
+                else:
+                    if (mass_lims[i-1] < obj["mass"]) & (obj["mass"] < mass_lims[i]):
+                        temp_catalogue.append(obj)
+                        temp_grids.append(grids[j])
+            self.binarity(p_range=p_range, q_range=q_range, grids=temp_grids, catalogue=temp_catalogue, model_cube=model_cube, verbose=False, **kwargs)
+            constraining_results[i] = self.fb_estimator()
+        return constraining_results
+    
+    def fb_estimator(self, cut=2, results=None):
+        '''
+            return MLE with pm
+            cut: number of sigmas that the pm should represent, defaults to 2
+            results: (fbs, likelihoods) tuple of lists of equal size corresponding
+                to the sampled binary fractions and their corresponding likelihoods
+        '''
+        working_ls, working_fbs = self.likelihoods, self.fbs
+        if results is not None:
+            working_ls, working_fbs = results
+        working_ls, working_fbs = np.array(working_ls), np.array(working_fbs)
+        working_ls -= np.max(working_ls)
+        
+        peakdx = np.argmax(working_ls)
+        maximum = working_fbs[peakdx]    
+        minus_loc = working_fbs[:peakdx][np.argmin(abs(working_ls[:peakdx]+cut))]   
+        plus_loc = working_fbs[peakdx:][np.argmin(abs(working_ls[peakdx:]+cut))]  
+        return maximum, plus_loc-maximum, maximum-minus_loc
+    
+    def fb_likelihood(self, fb=None, name=None, **kwargs):
+        plt.clf();
+        mle, p, m  = self.fb_estimator()
+        plt.plot(self.fbs, self.likelihoods, c="black", linewidth=3, **kwargs);
+        plt.axvline(x=mle, c="red", linestyle="--", label=r'FIT: ${:.3f}^{{+{:.3f}}}_{{-{:.3f}}}$'.format(mle,p,m));
+        if fb is not None:
+            plt.axvline(x=fb, c="green", linestyle="--", label=f"TRUTH: {fb}")
+        plt.xlabel("binary fraction");
+        plt.ylabel("log-likelihood");
+        plt.legend();
+        if name is not None:
+            plt.title(name)
+        plt.show();
+        
     ### --- ###
     def save_results(self, name, save_dir=None, note=None):          
         outdata = dict()
