@@ -194,6 +194,7 @@ def create_synthetic_data(
     object_count,
     catalogue,
     binary_fraction,
+    mass_model=None,
     period_model=None,
     ecc_type="circular",
     m_lim=(0.017, 0.2),
@@ -201,6 +202,7 @@ def create_synthetic_data(
     p_resolution=100,
     verbose=True,
     n_jobs=-1,
+    g=None
 ):
 
     ecc_func = {
@@ -224,7 +226,10 @@ def create_synthetic_data(
     pmdec = catalogue["pmdec"][idx].astype(float)
     plx = catalogue["parallax"][idx].astype(float)
     mass = catalogue["mass_single"][idx].astype(float)
-    gmag = catalogue["phot_g_mean_mag"][idx].astype(float)
+    if g is None:
+        gmag = catalogue["phot_g_mean_mag"][idx].astype(float)
+    else:
+        gmag = np.ones(object_count)*g # constant magnitude
     bprp = catalogue["bp_rp"][idx].astype(float)
 
     bin_idx = np.where(binary_mask)[0]
@@ -243,7 +248,8 @@ def create_synthetic_data(
     period = 10 ** logP
 
     # --- mass ratios ---
-    q = np.random.uniform(0.05, 0.5, nb)
+    if mass_model is None:
+        q = np.random.uniform(0.05, 0.5, nb)
     m2 = q * mass[bin_idx]
     bad = (m2 < m_lim[0]) | (m2 > m_lim[1])
     while np.any(bad):
@@ -262,7 +268,7 @@ def create_synthetic_data(
     # =============================
 
     if verbose:
-        pbar = tqdm(total=nb, desc="Computing Gaia solutions")
+        pbar = tqdm(total=nb, desc="Computing Binaries")
 
     with tqdm_joblib(pbar if verbose else tqdm(disable=True)):
         results = Parallel(

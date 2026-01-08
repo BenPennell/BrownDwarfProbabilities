@@ -121,13 +121,15 @@ def rescale_lambda_to_q(target_object, cube, lambdas, q_boundaries,
     mass = target_object["mass"]
     mass_ratios = q_from_l_vectorized(lambdas, mass, target_object["parallax"])
     companion_masses = mass * mass_ratios
+    #print(mass, mass_ratios, companion_masses)
 
     # Mask of acceptable lambda points
     valid_mask = (
-        (companion_masses > m2lim[0]) &
-        (companion_masses < m2lim[1]) &
-        (mass_ratios > qlim[0]) &
-        (mass_ratios < qlim[1])
+        #(companion_masses > m2lim[0]) &
+        #(companion_masses < m2lim[1]) &
+        # (mass_ratios > qlim[0]) &
+        # (mass_ratios < qlim[1])
+        mass_ratios > 0
     )
 
     # Get valid indices
@@ -150,7 +152,7 @@ def rescale_lambda_to_q(target_object, cube, lambdas, q_boundaries,
     return q_space_cube
 
 ### --- ###
-def compute_grid(target_object, sc_cubes, period_boundaries, m_boundaries, q_space=False):
+def compute_grid(target_object, sc_cubes, period_boundaries, m_boundaries, q_space=True):
     # the cube is stored with counts from the marginalisation
     # we need to divide out by this
     marg_counts = sc_cubes["meta"]["shape"][-1]
@@ -173,7 +175,7 @@ def compute_grid(target_object, sc_cubes, period_boundaries, m_boundaries, q_spa
     return fully_rescaled_cube
         
 ### --- ###
-def compute_grids(objects, sc_cubes, period_boundaries, m_boundaries, q_space=False, verbose=True):
+def compute_grids(objects, sc_cubes, period_boundaries, m_boundaries, q_space=True, verbose=True):
     '''
         wrapper for compute_grid() (above)
     '''
