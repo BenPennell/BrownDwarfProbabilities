@@ -95,9 +95,10 @@ def pexp(val, exp, val_range=(0, 1), ignore_a=False):
 
 
 # =============================
-# Eccentricity distributions
+# Different distributions
 # =============================
 
+# eccentricities
 es = np.linspace(0, 1, 100)
 
 e_pdf = np.zeros_like(es)
@@ -116,9 +117,13 @@ turnover_params = (3.5, 1)
 turnover_pdf = gaussian(periods_grid, *turnover_params)
 turnover_weight = np.cumsum(turnover_pdf / np.sum(turnover_pdf))
 
+# mass ratios
+qs = np.linspace(0.05,0.5,100)
+q_pdf = pexp(qs, 0.5)
+q_cdf = np.cumsum(q_pdf / np.sum(q_pdf))
 
 # =============================
-# Eccentricity models
+# Different models
 # =============================
 
 def circular_e(*args):
@@ -135,6 +140,9 @@ def turnover_e(logP):
     cdf = np.cumsum(dist / np.sum(dist))
     return np.interp(np.random.rand(), cdf, es)
 
+
+def exponential_q(count):
+    return np.array([np.interp(np.random.rand(), q_cdf, qs) for _ in range(count)])
 
 # =============================
 # Gaia helpers
@@ -250,10 +258,15 @@ def create_synthetic_data(
     # --- mass ratios ---
     if mass_model is None:
         q = np.random.uniform(0.05, 0.5, nb)
+    else:
+        q = exponential_q(nb)
     m2 = q * mass[bin_idx]
     bad = (m2 < m_lim[0]) | (m2 > m_lim[1])
     while np.any(bad):
-        q[bad] = np.random.uniform(0.05, 0.5, bad.sum())
+        if mass_model is None:
+            q[bad] = np.random.uniform(0.05, 0.5, bad.sum())
+        else:
+            q[bad] = exponential_q(bad.sum())
         m2[bad] = q[bad] * mass[bin_idx][bad]
         bad = (m2 < m_lim[0]) | (m2 > m_lim[1])
 
