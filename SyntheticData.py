@@ -201,7 +201,8 @@ def solve_binary(
 def create_synthetic_data(
     object_count,
     catalogue,
-    binary_fraction,
+    binary_fraction=None,
+    binarity_model=None,
     mass_model=None,
     period_model=None,
     ecc_type="circular",
@@ -219,12 +220,6 @@ def create_synthetic_data(
         "turnover": turnover_e,
     }.get(ecc_type, circular_e)
 
-    # --- binary mask ---
-    binary_count = int(np.floor(object_count * binary_fraction))
-    binary_mask = np.zeros(object_count, dtype=bool)
-    binary_mask[:binary_count] = True
-    np.random.shuffle(binary_mask)
-
     # --- select catalogue rows ---
     idx = np.random.choice(len(catalogue), object_count)
 
@@ -240,6 +235,13 @@ def create_synthetic_data(
         gmag = np.ones(object_count)*g # constant magnitude
     bprp = catalogue["bp_rp"][idx].astype(float)
 
+    # --- binary mask ---
+    if binary_fraction is not None:
+        p_bin = np.full(object_count, binary_fraction, dtype=float)
+    else: # use supplied model function
+        p_bin = np.asarray(binarity_model(mass), dtype=float)
+    binary_mask = np.random.rand(object_count) < p_bin    
+        
     bin_idx = np.where(binary_mask)[0]
     nb = len(bin_idx)
 

@@ -20,6 +20,10 @@ def calculate_orbit_parameter(m, q, w):
     return q*w*m**(1/3)*(1 + q)**(-2/3)
 
 ### --- ###
+def convert_binarity(fb, a):
+    return a / (a + 1/fb - 1)
+
+### --- ###
 def scale_resolution(arr, scale=2, axis=0, even=False):
     '''
         upscales grid resolution horizontally by splitting grid values evenly into multiple cells
@@ -210,7 +214,7 @@ def compute_grid(target_object, sc_cubes, period_boundaries, m_boundaries, q_spa
     return fully_rescaled_cube
         
 ### --- ###
-def compute_grids(objects, sc_cubes, period_boundaries, m_boundaries, q_space=True, mass_binned=False, verbose=True):
+def compute_grids(objects, sc_cubes, period_boundaries, m_boundaries, q_space=True, mass_binned=False, verbose=True, scale=5):
     '''
         wrapper for compute_grid() (above)
     '''
@@ -222,7 +226,7 @@ def compute_grids(objects, sc_cubes, period_boundaries, m_boundaries, q_space=Tr
         pbar = tqdm(total=len(objects))
     for target_object in objects:
         fully_rescaled_cube = compute_grid(target_object, sc_cubes, period_boundaries, m_boundaries, 
-                                           q_space=q_space, mass_binned=mass_binned)
+                                           q_space=q_space, mass_binned=mass_binned, scale=scale)
         grids.append(fully_rescaled_cube.ravel())
         if verbose:
             pbar.update(1)
@@ -416,15 +420,15 @@ class popsampler():
         working_catalogue = np.array(working_catalogue)
         return working_catalogue, soltypes
     
-    def assign_grids(self, working_catalogue, p_range, q_range, mass_binned=False, verbose=True):
+    def assign_grids(self, working_catalogue, p_range, q_range, mass_binned=False, scale=5, verbose=True):
         p_boundaries = np.linspace(*p_range, self.model_cube.shape[0]+1)[1:-1]
         q_boundaries = np.linspace(*q_range, self.model_cube.shape[1]+1)[1:-1]
         grids = np.array(compute_grids(working_catalogue, self.sc_cubes, p_boundaries, q_boundaries, 
-                                       q_space=True, mass_binned=mass_binned, verbose=verbose))
+                                       q_space=True, mass_binned=mass_binned, scale=scale, verbose=verbose))
         return grids
     
     def binarity(self, resolution=250, p_range=(1,8), q_range=(0.05,0.5), cutoff=np.exp(-18), 
-                 grids=None, catalogue=None, model_cube=None, mass_binned=False, verbose=True):
+                 grids=None, catalogue=None, model_cube=None, mass_binned=False, scale=5, verbose=True):
         '''
             binarity likelihood across fb
         '''        
@@ -439,7 +443,7 @@ class popsampler():
         if grids is None:
             if verbose:
                 print("Computing grids...")
-            grids = self.assign_grids(working_catalogue, p_range, q_range, mass_binned=mass_binned, verbose=verbose)
+            grids = self.assign_grids(working_catalogue, p_range, q_range, mass_binned=mass_binned, scale=scale, verbose=verbose)
         
         if verbose:
             print("Computing likelihoods...")
