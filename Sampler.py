@@ -89,9 +89,15 @@ def q_from_l_vectorized(l_array, m, w):
     return q_vals
 
 ### --- ###
-def rescale_period(cube, periods, period_boundaries):
+def rescale_period(cube, periods, period_boundaries, plim=(1,8)):
     bin_indices = np.searchsorted(period_boundaries, periods, side="right")
 
+    # Mask of acceptable lambda points
+    # valid_mask = (
+    #     (periods > plim[0]) &
+    #     (periods < plim[1])
+    # )
+    
     # sum up the corresponding rows
     reshaped_cube = np.zeros((len(period_boundaries) + 1, cube.shape[1]), dtype=cube.dtype)
     np.add.at(reshaped_cube, bin_indices, cube)
@@ -178,7 +184,7 @@ def rescale_lambda_to_q(target_object, cube, lambdas, q_boundaries,
     return q_space_cube
 
 ### --- ###
-def compute_grid(target_object, sc_cubes, period_boundaries, m_boundaries, q_space=True, mass_binned=False, use_mass_index=True, scale=5):
+def compute_grid(target_object, sc_cubes, period_boundaries, m_boundaries, q_space=True, mass_binned=False, use_mass_index=True, scale=5, plim=(1,8)):
     # the cube is stored with counts from the marginalisation
     # we need to divide out by this
     marg_counts = sc_cubes["meta"]["shape"][-1]
@@ -203,7 +209,7 @@ def compute_grid(target_object, sc_cubes, period_boundaries, m_boundaries, q_spa
     working_lambdas = np.linspace((grid_lambdas**(1/4))[0], (grid_lambdas**(1/4))[-1], scale*len(grid_lambdas))**4
     
     # scale it down to the right period binning
-    period_scaled_cube = rescale_period(working_cube, np.log10(sc_cubes["meta"]["periods"]), period_boundaries)
+    period_scaled_cube = rescale_period(working_cube, np.log10(sc_cubes["meta"]["periods"]), period_boundaries, plim=plim)
     
     # and scale it to the working companion mass
     rescale_mass_coordinate = rescale_lambda
@@ -214,7 +220,7 @@ def compute_grid(target_object, sc_cubes, period_boundaries, m_boundaries, q_spa
     return fully_rescaled_cube
         
 ### --- ###
-def compute_grids(objects, sc_cubes, period_boundaries, m_boundaries, q_space=True, mass_binned=False, verbose=True, scale=5):
+def compute_grids(objects, sc_cubes, period_boundaries, m_boundaries, q_space=True, mass_binned=False, verbose=True, scale=5, plim=(1,8)):
     '''
         wrapper for compute_grid() (above)
     '''
@@ -226,7 +232,7 @@ def compute_grids(objects, sc_cubes, period_boundaries, m_boundaries, q_space=Tr
         pbar = tqdm(total=len(objects))
     for target_object in objects:
         fully_rescaled_cube = compute_grid(target_object, sc_cubes, period_boundaries, m_boundaries, 
-                                           q_space=q_space, mass_binned=mass_binned, scale=scale)
+                                           q_space=q_space, mass_binned=mass_binned, scale=scale, plim=plim)
         grids.append(fully_rescaled_cube.ravel())
         if verbose:
             pbar.update(1)
@@ -264,7 +270,8 @@ def area_in_range_powerlaw(target_range, index, resolution=100):
     return np.trapezoid(y=ys, x=xs)
 
 ### --- ###
-def create_model_cube(grid_shape, p_model=None, p_range=(1,8), q_model=0, q_range=(0.05,0.5)):
+def create_model_cube(grid_shape, p_model=None, q_model=0, pcut=None,
+                      p_range=(1,8), q_range=(0.05,0.5)):
     '''
         log-normal period distribution, power-law mass ratio distribution
         p_model: (T_mu, T_si)
@@ -282,6 +289,10 @@ def create_model_cube(grid_shape, p_model=None, p_range=(1,8), q_model=0, q_rang
         total_area = area_in_range(p_range, p_mu, p_si, resolution=period_count*10)
         for i in range(period_count):
             p_dist[i] = area_in_range((p_vals[i],p_vals[i+1]), p_mu, p_si, resolution=period_count*10) / total_area
+    
+    # make an upper bound period cut
+    if pcut is not None:
+        p_dist[np.argmin(abs(pcut-np.linspace(*p_range, grid_shape[0])))+1:] = 0 
     
     # set up mass ratio distribution
     q_count = grid_shape[1]

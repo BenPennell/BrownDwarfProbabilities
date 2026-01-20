@@ -1,10 +1,15 @@
 import matplotlib.pyplot as plt
 import matplotlib
 
-matplotlib.rcParams["font.family"] = "monospace"
-matplotlib.rcParams["font.monospace"] = ["FreeMono"]
+plt.rcParams.update({
+    "text.usetex": True,
+    "font.family": "serif",
+    "text.latex.preamble": r"\usepackage{amsmath}",
+})
+plt.figure()
+plt.title("Test")
+plt.show()
 matplotlib.rcParams['figure.figsize'] = (12, 10)
-matplotlib.rcParams['figure.dpi'] = 600
 matplotlib.rcParams["axes.labelsize"] = 18
 matplotlib.rcParams["axes.titlesize"] = 18
 matplotlib.rcParams["legend.fontsize"] = 16
