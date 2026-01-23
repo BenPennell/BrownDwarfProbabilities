@@ -111,7 +111,7 @@ def rescale_period(cube, periods, period_boundaries, plim=(1,8)):
 
 ### --- ###
 def rescale_lambda(target_object, cube, lambdas, m2_boundaries, 
-                   m2lim=(0.017, 0.2), qlim=(0.05, 0.5)):
+                   m2lim=(0.017, 0.2), qlim=(0.05, 0.5), save_cols=True):
 
     # Precompute masses and q
     mass = target_object["mass"]
@@ -147,7 +147,7 @@ def rescale_lambda(target_object, cube, lambdas, m2_boundaries,
 
 ### --- ###
 def rescale_lambda_to_q(target_object, cube, lambdas, q_boundaries, 
-                   m2lim=(0.017, 0.2), qlim=(0.05, 0.5)):
+                   m2lim=(0.017, 0.2), qlim=(0.05, 0.5), save_cols=True):
 
     # Precompute masses and q
     mass = target_object["mass"]
@@ -180,11 +180,17 @@ def rescale_lambda_to_q(target_object, cube, lambdas, q_boundaries,
     counts = np.bincount(col_bins, minlength=q_space_cube.shape[1])
     mask_empty = counts > 0
     q_space_cube[:, mask_empty] /= counts[mask_empty][None, :]
+    
+    # Fill empty any empty columns on the right by copying the last non-empty column
+    if save_cols:
+        last_valid = np.where(counts > 0)[0][-1]
+        if sum(q_space_cube[:,-1]) == 0:  # last column is empty
+            q_space_cube[:, last_valid+1:] = np.tile(q_space_cube[:, last_valid][:, np.newaxis], (1, q_space_cube.shape[1] - last_valid - 1)) # copy the nearest valid column
 
     return q_space_cube
 
 ### --- ###
-def compute_grid(target_object, sc_cubes, period_boundaries, m_boundaries, q_space=True, mass_binned=False, use_mass_index=True, scale=5, plim=(1,8)):
+def compute_grid(target_object, sc_cubes, period_boundaries, m_boundaries, q_space=True, mass_binned=False, use_mass_index=True, scale=5, plim=(1,8), save_cols=True):
     # the cube is stored with counts from the marginalisation
     # we need to divide out by this
     marg_counts = sc_cubes["meta"]["shape"][-1]
@@ -215,7 +221,7 @@ def compute_grid(target_object, sc_cubes, period_boundaries, m_boundaries, q_spa
     rescale_mass_coordinate = rescale_lambda
     if q_space:
         rescale_mass_coordinate = rescale_lambda_to_q
-    fully_rescaled_cube = rescale_mass_coordinate(target_object, period_scaled_cube, working_lambdas, m_boundaries)
+    fully_rescaled_cube = rescale_mass_coordinate(target_object, period_scaled_cube, working_lambdas, m_boundaries, save_cols=save_cols)
     
     return fully_rescaled_cube
         
@@ -308,26 +314,7 @@ def create_model_cube(grid_shape, p_model=None, q_model=0, pcut=None,
     return model_cube
 
 ### --- ###
-def softmax(logits):
-    """
-    Convert N-1 unconstrained logits to N probabilities that sum to 1.
-    This is numerically stable.
-    """
-    exp_logits = np.exp(logits - np.max(logits))
-    sum_exp = np.sum(exp_logits)
-    
-    p = np.zeros(len(logits) + 1)
-    p[:-1] = exp_logits / (1 + sum_exp)
-    p[-1] = 1 / (1 + sum_exp)
-    return p
-
-### --- ###
-def calculate_log_likelihood(mcmc_params, soltypes, grids, model_cube, cutoff=np.exp(-18)): 
-    fb = mcmc_params[0]
-    # make sure we're within fb prior
-    if (fb < 0) | (fb > 1):
-        return -np.inf
-    
+def calculate_log_likelihood(fb, soltypes, grids, model_cube, cutoff=np.exp(-18)): 
     # compute individual solution chance
     dot_values = fb * np.dot(grids, model_cube.ravel())
 
@@ -338,21 +325,32 @@ def calculate_log_likelihood(mcmc_params, soltypes, grids, model_cube, cutoff=np
     return np.sum(np.log(np.maximum(dot_values, cutoff)))
 
 ### --- ###
-def grid_likelihood(mcmc_params, soltypes, grids, cutoff=np.exp(-18), sigma=2):
-    # convert real valued parameters to a logical probability distribution
-    # using softmax so that we don't have to deal with multinomials
-    grid_params = mcmc_params[1:] # retrieve the (N-1) M-T grid parameters
-    logits = grid_params - np.mean(grid_params) # make it a centered distribution, this helps prevent some degeneracies
-    grid_probs = softmax(logits)
+def within_prior(mcmc_params):
+    fb, pcut, q_index = mcmc_params
+    if (fb < 0) | (fb > 1):
+        return False
+    if (pcut < 3) | (pcut > 8):
+        return False
+    if (q_index < 0) | (q_index > 3):
+        return False
+    return True
 
-    # compute log-likelihoods for this model cube
-    likelihood = calculate_log_likelihood(mcmc_params, soltypes, grids, grid_probs, cutoff=cutoff)
-    
-    # weight-away super high parameter values to not get stuck
-    prior_term = -0.5 * np.sum((grid_params / sigma)**2)
-    
-    return prior_term + likelihood
-    
+### --- ###
+def likelihood_wrapper(mcmc_params, soltypes, grids, grid_shape, p_model, cutoff=np.exp(-18)):
+    if not within_prior(mcmc_params):
+        return -np.inf
+    fb = mcmc_params[0]
+    model_cube = create_model_cube(grid_shape, p_model=p_model, pcut=mcmc_params[1], q_model=mcmc_params[2])
+    return calculate_log_likelihood(fb, soltypes, grids, model_cube, cutoff=cutoff)
+
+### --- ###
+def initialise_walkers(nwalkers):
+    initial_params = np.zeros((nwalkers, 3))
+    initial_params[:,0] = np.random.uniform(0.01,0.99, nwalkers) # fb
+    initial_params[:,1] = np.random.uniform(3,8, nwalkers)       # pcut
+    initial_params[:,2] = np.random.uniform(0,3, nwalkers)       # q_index
+    return initial_params
+
 ### --- ###
 class popsampler():
     def __init__(self, sc_cubes, catalogue, p_boundaries=None, m_boundaries=None, model_cube=None):
@@ -370,42 +368,33 @@ class popsampler():
         self.likelihoods = None
 
     ### --- ###
-    def constrain_parameters(self, step_count=30, nwalkers=50, initialisation_weight=1e-2, cutoff=np.exp(-18)):
+    def constrain_parameters(self, p_model, step_count=30, nwalkers=50,
+                             p_range=(1,8), q_range=(0.05,0.5), cutoff=np.exp(-18), 
+                            grids=None, catalogue=None, model_cube=None, mass_binned=False, scale=5, verbose=True):
         temp_kwargs = dict()
         temp_kwargs["cutoff"] = cutoff
         
-        print("Reducing catalogue...")
-        working_catalogue = []
-        soltypes = np.zeros(len(self.catalogue), dtype=np.int8)
-        for i, target_object in enumerate(self.catalogue):
-            # save just parallax and mass for grid conversion
-            reduced_object = {
-                "parallax": target_object["parallax"],
-                "mass": target_object["mass"],
-                "soltype_index": SOLUTION_TYPES.index(target_object["solution_type"])
-            }
-            working_catalogue.append(reduced_object)
+        if verbose:
+            print("Reducing catalogue...")
+        working_catalogue, soltypes = self.reduce_catalogue(catalogue=catalogue)
+        
+        if model_cube is not None:
+            self.model_cube = model_cube
             
-            # save just solution type for use at inference
-            soltypes[i] = target_object["solution_type"] 
-        working_catalogue = np.array(working_catalogue)
-
         # precompute the q-L mappings for all the objects
-        print("Computing grids...")
-        grids = np.array(compute_grids(working_catalogue, self.sc_cubes, self.p_boundaries, self.m_boundaries))
+        if grids is None:
+            if verbose:
+                print("Computing grids...")
+            grids = self.assign_grids(working_catalogue, p_range, q_range, mass_binned=mass_binned, scale=scale, verbose=verbose)
         
         # run mcmc
         print("Running markov chains...")
-        args = (soltypes, grids)
+        args = (soltypes, grids, self.model_cube.shape, p_model)
         self.sampler = None
-        ndim = (len(self.p_boundaries)+1)*(len(self.m_boundaries)+1)+1-1 # +1 for fb, -1 because we need N-1 dims for constraining
-        initial_params = np.zeros((nwalkers, ndim))
-        # prior on binary fraction is flat
-        initial_params[:,0] = np.random.rand(nwalkers)
-        # prior on grid is sampled around zero
-        initial_params[:,1:] = initialisation_weight * np.random.randn(nwalkers, ndim-1) #np.random.normal(0, 1, size=(nwalkers, ndim-1))
+        ndim = 3 # fb, p_cutoff, q_index
+        initial_params = initialise_walkers(nwalkers)
         pool = multiprocessing.Pool()
-        sampler = emcee.EnsembleSampler(nwalkers, ndim, grid_likelihood, 
+        sampler = emcee.EnsembleSampler(nwalkers, ndim, likelihood_wrapper, 
                                     args=args, kwargs=temp_kwargs, pool=pool)
         sampler.run_mcmc(initial_params, step_count, progress=True, skip_initial_state_check=True)
         print("Complete!")
@@ -463,7 +452,7 @@ class popsampler():
         if verbose:
             pbar = tqdm(total=resolution)
         for i in range(resolution):
-            likelihoods[i] = calculate_log_likelihood([fbs[i]], soltypes, grids, working_model_cube, cutoff=cutoff)
+            likelihoods[i] = calculate_log_likelihood(fbs[i], soltypes, grids, working_model_cube, cutoff=cutoff)
             if verbose:
                 pbar.update(1)
 

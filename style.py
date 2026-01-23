@@ -6,10 +6,7 @@ plt.rcParams.update({
     "font.family": "serif",
     "text.latex.preamble": r"\usepackage{amsmath}",
 })
-plt.figure()
-plt.title("Test")
-plt.show()
-matplotlib.rcParams['figure.figsize'] = (12, 10)
+#matplotlib.rcParams['figure.figsize'] = (12, 10)
 matplotlib.rcParams["axes.labelsize"] = 18
 matplotlib.rcParams["axes.titlesize"] = 18
 matplotlib.rcParams["legend.fontsize"] = 16
