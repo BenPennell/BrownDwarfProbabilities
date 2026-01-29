@@ -276,6 +276,26 @@ def area_in_range_powerlaw(target_range, index, resolution=100):
     return np.trapezoid(y=ys, x=xs)
 
 ### --- ###
+def cutoff_to_fraction(p_model, pcut):
+    p_mu, p_si = p_model
+    total_area = area_in_range((1,pcut), p_mu, p_si, resolution=100)
+    observable_area = area_in_range((2,3), p_mu, p_si, resolution=100)
+    return observable_area / total_area
+
+### --- ###
+def fraction_to_cutoff(p_model, fraction):
+    p_mu, p_si = p_model
+    observable_area = area_in_range((2,3), p_mu, p_si, resolution=100)
+    target_area = observable_area / fraction
+    # search for cutoff
+    pcut_vals = np.linspace(3,8,1000)
+    for pcut in pcut_vals:
+        total_area = area_in_range((1,pcut), p_mu, p_si, resolution=100)
+        if total_area >= target_area:
+            return pcut
+    return 8.0
+
+### --- ###
 def create_model_cube(grid_shape, p_model=None, q_model=0, pcut=None,
                       p_range=(1,8), q_range=(0.05,0.5)):
     '''
@@ -340,7 +360,10 @@ def likelihood_wrapper(mcmc_params, soltypes, grids, grid_shape, p_model, cutoff
     if not within_prior(mcmc_params):
         return -np.inf
     fb = mcmc_params[0]
-    model_cube = create_model_cube(grid_shape, p_model=p_model, pcut=mcmc_params[1], q_model=mcmc_params[2])
+    pcut = 5 #mcmc_params[1]
+    q_model = mcmc_params[2]
+
+    model_cube = create_model_cube(grid_shape, p_model=p_model, pcut=pcut, q_model=q_model)
     return calculate_log_likelihood(fb, soltypes, grids, model_cube, cutoff=cutoff)
 
 ### --- ###
@@ -399,6 +422,37 @@ class popsampler():
         sampler.run_mcmc(initial_params, step_count, progress=True, skip_initial_state_check=True)
         print("Complete!")
         self.sampler = sampler
+    
+    ### --- ###
+    def q_along_grid(self, p_model, fb, pcut,
+                             p_range=(1,8), q_range=(0.05,0.5), cutoff=np.exp(-18), 
+                            grids=None, catalogue=None, model_cube=None, mass_binned=False, scale=5, verbose=True):
+        temp_kwargs = dict()
+        temp_kwargs["cutoff"] = cutoff
+        
+        if verbose:
+            print("Reducing catalogue...")
+        working_catalogue, soltypes = self.reduce_catalogue(catalogue=catalogue)
+        
+        if model_cube is not None:
+            self.model_cube = model_cube
+            
+        # precompute the q-L mappings for all the objects
+        if grids is None:
+            if verbose:
+                print("Computing grids...")
+            grids = self.assign_grids(working_catalogue, p_range, q_range, mass_binned=mass_binned, scale=scale, verbose=verbose)
+        
+        # run mcmc
+        print("Calculating likelihoods...")
+        args = (soltypes, grids, self.model_cube.shape, p_model)
+        likelihoods = []
+        gammas = np.linspace(0,2,1000)
+        for gamma in tqdm(gammas):
+            likelihoods.append(likelihood_wrapper([fb,pcut,gamma], *args, **temp_kwargs))
+            
+        print("Complete!")
+        return gammas, likelihoods
     
     def reduce_catalogue(self, catalogue=None):
         temp_catalogue = self.catalogue
