@@ -117,11 +117,6 @@ turnover_params = (3.5, 1)
 turnover_pdf = gaussian(periods_grid, *turnover_params)
 turnover_weight = np.cumsum(turnover_pdf / np.sum(turnover_pdf))
 
-# mass ratios
-qs = np.linspace(0.05,0.5,100)
-q_pdf = pexp(qs, 0.5)
-q_cdf = np.cumsum(q_pdf / np.sum(q_pdf))
-
 # =============================
 # Different models
 # =============================
@@ -139,10 +134,6 @@ def turnover_e(logP):
     dist = (1 - w) * p_gaus + w * p_therm
     cdf = np.cumsum(dist / np.sum(dist))
     return np.interp(np.random.rand(), cdf, es)
-
-
-def exponential_q(count):
-    return np.array([np.interp(np.random.rand(), q_cdf, qs) for _ in range(count)])
 
 # =============================
 # Gaia helpers
@@ -235,6 +226,13 @@ def create_synthetic_data(
         gmag = np.ones(object_count)*g # constant magnitude
     bprp = catalogue["bp_rp"][idx].astype(float)
 
+    if mass_model is not None:
+        qs = np.linspace(0.05, 0.5, 1000)
+        q_pdf = pexp(qs, mass_model)
+        q_cdf = np.cumsum(q_pdf / np.sum(q_pdf))
+        def exponential_q(count):
+            return np.array([np.interp(np.random.rand(), q_cdf, qs) for _ in range(count)])   
+         
     # --- binary mask ---
     if binary_fraction is not None:
         p_bin = np.full(object_count, binary_fraction, dtype=float)

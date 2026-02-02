@@ -181,7 +181,7 @@ def rescale_lambda_to_q(target_object, cube, lambdas, q_boundaries,
     mask_empty = counts > 0
     q_space_cube[:, mask_empty] /= counts[mask_empty][None, :]
     
-    # Fill empty any empty columns on the right by copying the last non-empty column
+    # Fill any empty columns on the right by copying the last non-empty column
     if save_cols:
         last_valid = np.where(counts > 0)[0][-1]
         if sum(q_space_cube[:,-1]) == 0:  # last column is empty
@@ -346,32 +346,32 @@ def calculate_log_likelihood(fb, soltypes, grids, model_cube, cutoff=np.exp(-18)
 
 ### --- ###
 def within_prior(mcmc_params):
-    fb, pcut, q_index = mcmc_params
+    fb, q_index = mcmc_params
     if (fb < 0) | (fb > 1):
         return False
-    if (pcut < 3) | (pcut > 8):
-        return False
-    if (q_index < 0) | (q_index > 3):
+    # if (pcut < 3) | (pcut > 8):
+    #     return False
+    if (q_index < -0.5) | (q_index > 3):
         return False
     return True
 
 ### --- ###
-def likelihood_wrapper(mcmc_params, soltypes, grids, grid_shape, p_model, cutoff=np.exp(-18)):
+def likelihood_wrapper(mcmc_params, soltypes, grids, grid_shape, p_model, pcut=None, cutoff=np.exp(-18)):
     if not within_prior(mcmc_params):
         return -np.inf
     fb = mcmc_params[0]
-    pcut = 5 #mcmc_params[1]
-    q_model = mcmc_params[2]
+    # pcut = 5 #mcmc_params[1]
+    q_model = mcmc_params[1]
 
-    model_cube = create_model_cube(grid_shape, p_model=p_model, pcut=pcut, q_model=q_model)
+    model_cube = create_model_cube(grid_shape, p_model=p_model, q_model=q_model, pcut=pcut)
     return calculate_log_likelihood(fb, soltypes, grids, model_cube, cutoff=cutoff)
 
 ### --- ###
 def initialise_walkers(nwalkers):
-    initial_params = np.zeros((nwalkers, 3))
+    initial_params = np.zeros((nwalkers, 2))
     initial_params[:,0] = np.random.uniform(0.01,0.99, nwalkers) # fb
-    initial_params[:,1] = np.random.uniform(3,8, nwalkers)       # pcut
-    initial_params[:,2] = np.random.uniform(0,3, nwalkers)       # q_index
+    #initial_params[:,1] = np.random.uniform(3,8, nwalkers)       # pcut
+    initial_params[:,1] = np.random.uniform(0,3, nwalkers)       # q_index
     return initial_params
 
 ### --- ###
@@ -414,7 +414,7 @@ class popsampler():
         print("Running markov chains...")
         args = (soltypes, grids, self.model_cube.shape, p_model)
         self.sampler = None
-        ndim = 3 # fb, p_cutoff, q_index
+        ndim = 2 # fb, q_index
         initial_params = initialise_walkers(nwalkers)
         pool = multiprocessing.Pool()
         sampler = emcee.EnsembleSampler(nwalkers, ndim, likelihood_wrapper, 
@@ -429,6 +429,7 @@ class popsampler():
                             grids=None, catalogue=None, model_cube=None, mass_binned=False, scale=5, verbose=True):
         temp_kwargs = dict()
         temp_kwargs["cutoff"] = cutoff
+        temp_kwargs["pcut"] = pcut
         
         if verbose:
             print("Reducing catalogue...")
@@ -447,14 +448,14 @@ class popsampler():
         print("Calculating likelihoods...")
         args = (soltypes, grids, self.model_cube.shape, p_model)
         likelihoods = []
-        gammas = np.linspace(0,2,1000)
+        gammas = np.linspace(-0.5,2,1000)
         for gamma in tqdm(gammas):
-            likelihoods.append(likelihood_wrapper([fb,pcut,gamma], *args, **temp_kwargs))
+            likelihoods.append(likelihood_wrapper([fb,gamma], *args, **temp_kwargs))
             
         print("Complete!")
         return gammas, likelihoods
     
-    def reduce_catalogue(self, catalogue=None):
+    def reduce_catalogue(self, catalogue=None, mass_binned=False):
         temp_catalogue = self.catalogue
         if catalogue is not None:
             temp_catalogue = catalogue
@@ -467,6 +468,8 @@ class popsampler():
                 "mass": target_object["mass"],
                 "soltype_index": SOLUTION_TYPES.index(target_object["solution_type"])
             }
+            if mass_binned:
+                reduced_object["mass_index"] = target_object["mass_index"]
             working_catalogue.append(reduced_object)
             
             # save just solution type for use at inference
@@ -488,7 +491,7 @@ class popsampler():
         '''        
         if verbose:
             print("Reducing catalogue...")
-        working_catalogue, soltypes = self.reduce_catalogue(catalogue=catalogue)
+        working_catalogue, soltypes = self.reduce_catalogue(catalogue=catalogue, mass_binned=mass_binned)
         
         working_model_cube = self.model_cube
         if model_cube is not None:
