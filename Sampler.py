@@ -4,6 +4,8 @@ import multiprocessing
 import datetime
 import pickle
 import matplotlib.pyplot as plt
+from matplotlib import colors
+import corner
 
 try:
     # for Jupyter
@@ -318,7 +320,8 @@ def create_model_cube(grid_shape, p_model=None, q_model=0, pcut=None,
     
     # make an upper bound period cut
     if pcut is not None:
-        p_dist[np.argmin(abs(pcut-np.linspace(*p_range, grid_shape[0])))+1:] = 0 
+        p_dist[:np.argmin(abs(pcut[0]-np.linspace(*p_range, grid_shape[0])))] = 0 # lower cut
+        p_dist[np.argmin(abs(pcut[1]-np.linspace(*p_range, grid_shape[0])))+1:] = 0 # upper cut
     
     # set up mass ratio distribution
     q_count = grid_shape[1]
@@ -333,7 +336,57 @@ def create_model_cube(grid_shape, p_model=None, q_model=0, pcut=None,
     model_cube = model_cube / model_cube.sum() # should sum to 1 actually
     return model_cube
 
+### ------------------- ###
+### --- WD template --- ###
+
 ### --- ###
+def f_q(q, ql, qh, b, m_rg, alpha):
+    if (q < ql) | (q > qh):
+        return 0
+    return (q - b/m_rg)**(-1-alpha)
+
+### --- ###
+def calculate_ql(a, m_rg, b, d):
+    return a*(m_rg+d)/m_rg + b/m_rg
+
+### --- ###
+def wd_create_model_cube(grid_shape, m_rg, a, b, d, alpha, 
+                      p_model=None, pcut=None,
+                      p_range=(1,8), q_range=(0.05,0.5)):
+    # set up period distribution
+    if p_model is None:
+        p_dist = np.ones(grid_shape[0])/grid_shape[0]
+    else:
+        p_mu, p_si = p_model
+        period_count = grid_shape[0]
+        p_vals = np.linspace(*p_range, period_count+1)
+        p_dist = np.zeros(period_count)
+        total_area = area_in_range(p_range, p_mu, p_si, resolution=period_count*10)
+        for i in range(period_count):
+            p_dist[i] = area_in_range((p_vals[i],p_vals[i+1]), p_mu, p_si, resolution=period_count*10) / total_area
+    
+    # make bounded cuts on the period
+    if pcut is not None:
+        p_dist[:np.argmin(abs(pcut[0]-np.linspace(*p_range, grid_shape[0])))] = 0 # lower cut
+        p_dist[np.argmin(abs(pcut[1]-np.linspace(*p_range, grid_shape[0])))+1:] = 0 # upper cut
+    
+    # set up mass ratio distribution
+    q_count = grid_shape[1]
+    q_vals = np.linspace(*q_range,q_count)
+
+    ql = calculate_ql(a, m_rg, b, d)
+    qh = 1.4/m_rg
+    fqwds = np.array([f_q(q, ql, qh, b, m_rg, alpha) for q in q_vals])
+    q_dist = fqwds / np.trapezoid(fqwds, q_vals)
+    
+    # construct cube
+    model_cube = np.outer(p_dist, q_dist)
+    model_cube = model_cube / model_cube.sum() # should sum to 1 actually
+    return model_cube
+
+### --- WD template --- ###
+### ------------------- ###
+
 def calculate_log_likelihood(fb, soltypes, grids, model_cube, cutoff=np.exp(-18)): 
     # compute individual solution chance
     dot_values = fb * np.dot(grids, model_cube.ravel())
@@ -356,7 +409,16 @@ def within_prior(mcmc_params):
     return True
 
 ### --- ###
-def likelihood_wrapper(mcmc_params, soltypes, grids, grid_shape, p_model, pcut=None, cutoff=np.exp(-18)):
+def wd_within_prior(mcmc_params):
+    fb, fwd = mcmc_params
+    if (fb < 0) | (fb > 1):
+        return False
+    if (fwd < 0) | (fwd > 1):
+        return False
+    return True
+
+### --- ###
+def likelihood_wrapper(mcmc_params, soltypes, grids, grid_shape, p_model, pcut, cutoff):
     if not within_prior(mcmc_params):
         return -np.inf
     fb = mcmc_params[0]
@@ -375,53 +437,106 @@ def initialise_walkers(nwalkers):
     return initial_params
 
 ### --- ###
+def wd_likelihood_wrapper(mcmc_params, wd_params, soltypes, grids, grid_shape, p_model, q_model, pcut, cutoff):
+    if not wd_within_prior(mcmc_params):
+        return -np.inf
+    fb, fwd = mcmc_params
+
+    ms_model_cube = create_model_cube(grid_shape, p_model=p_model, q_model=q_model, pcut=pcut)
+    wd_model_cube = wd_create_model_cube(grid_shape, *wd_params, p_model=p_model, pcut=pcut)
+    model_cube = (1-fwd)*ms_model_cube + fwd*wd_model_cube
+    return calculate_log_likelihood(fb, soltypes, grids, model_cube, cutoff=cutoff)
+
+### --- ###
+def wd_initialise_walkers(nwalkers):
+    initial_params = np.zeros((nwalkers, 2))
+    initial_params[:,0] = np.random.uniform(0.01,0.99, nwalkers) # fb
+    initial_params[:,1] = np.random.uniform(0.01,0.99, nwalkers) # fwd
+    return initial_params
+
+### --- ###
+def fisher_uncertainty(likelihoods):
+    fbs = np.linspace(0.02,0.98,len(likelihoods))
+    dtheta = fbs[1] - fbs[0]
+    ind_max = np.argmax(likelihoods)
+    
+    # compute second derivative from linear approximation
+    second_derivative = np.array([likelihoods[ind_max + 1] - 2 * likelihoods[ind_max] + likelihoods[ind_max - 1]])/dtheta**2 
+    # fisher information
+    sigma = 1 / np.sqrt(-second_derivative)
+    return sigma
+
+### --- ###
 class popsampler():
-    def __init__(self, sc_cubes, catalogue, p_boundaries=None, m_boundaries=None, model_cube=None):
+    def __init__(self, sc_cubes, catalogue, model_cube=None):
         self.sc_cubes = sc_cubes
         self.catalogue = catalogue
         
-        # for grid parameters
-        self.p_boundaries = p_boundaries
-        self.m_boundaries = m_boundaries
         # for imposed models
         self.model_cube = model_cube
         # for the results
         self.sampler = None
         self.fbs = None
-        self.likelihoods = None
+        self.likelihood_set = None
+        self.locals = None
+        self.locals_ranges = None
 
     ### --- ###
-    def constrain_parameters(self, p_model, step_count=30, nwalkers=50,
+    def constrain_parameters(self, p_model, pcut=(1,8), model_cube_shape=(35,25), step_count=1000, nwalkers=7,
                              p_range=(1,8), q_range=(0.05,0.5), cutoff=np.exp(-18), 
-                            grids=None, catalogue=None, model_cube=None, mass_binned=False, scale=5, verbose=True):
-        temp_kwargs = dict()
-        temp_kwargs["cutoff"] = cutoff
-        
+                            grids=None, catalogue=None, mass_binned=False, scale=5, verbose=True):
         if verbose:
             print("Reducing catalogue...")
         working_catalogue, soltypes = self.reduce_catalogue(catalogue=catalogue)
-        
-        if model_cube is not None:
-            self.model_cube = model_cube
             
         # precompute the q-L mappings for all the objects
         if grids is None:
             if verbose:
                 print("Computing grids...")
-            grids = self.assign_grids(working_catalogue, p_range, q_range, mass_binned=mass_binned, scale=scale, verbose=verbose)
+            grids = self.assign_grids(model_cube_shape, working_catalogue, p_range, q_range, mass_binned=mass_binned, scale=scale, verbose=verbose)
         
         # run mcmc
         print("Running markov chains...")
-        args = (soltypes, grids, self.model_cube.shape, p_model)
+        args = (soltypes, grids, model_cube_shape, p_model, pcut, cutoff)
         self.sampler = None
         ndim = 2 # fb, q_index
         initial_params = initialise_walkers(nwalkers)
         pool = multiprocessing.Pool()
         sampler = emcee.EnsembleSampler(nwalkers, ndim, likelihood_wrapper, 
-                                    args=args, kwargs=temp_kwargs, pool=pool)
+                                    args=args, pool=pool)
         sampler.run_mcmc(initial_params, step_count, progress=True, skip_initial_state_check=True)
         print("Complete!")
         self.sampler = sampler
+        self.locals = ["fb", "gamma"]
+        self.locals_ranges = [(0,1), (-0.5,2)]
+        
+    ### --- ###
+    def wd_constrain_parameters(self, wd_params, model_cube_shape=(35,25), p_model=(4, 1.3), q_model=0, pcut=(2,8), step_count=1000, nwalkers=5,
+                             p_range=(1,8), q_range=(0.05,0.5), cutoff=np.exp(-18), 
+                            grids=None, catalogue=None, mass_binned=False, scale=5, verbose=True):
+        if verbose:
+            print("Reducing catalogue...")
+        working_catalogue, soltypes = self.reduce_catalogue(catalogue=catalogue)
+            
+        # precompute the q-L mappings for all the objects
+        if grids is None:
+            if verbose:
+                print("Computing grids...")
+            grids = self.assign_grids(model_cube_shape, working_catalogue, p_range, q_range, mass_binned=mass_binned, scale=scale, verbose=verbose)
+        
+        # run mcmc
+        print("Running markov chains...")
+        args = (wd_params, soltypes, grids, model_cube_shape, p_model, q_model, pcut, cutoff)
+        self.sampler = None
+        ndim = 2 # fb, fwd
+        initial_params = wd_initialise_walkers(nwalkers)
+        pool = multiprocessing.Pool()
+        sampler = emcee.EnsembleSampler(nwalkers, ndim, wd_likelihood_wrapper, args=args, pool=pool)
+        sampler.run_mcmc(initial_params, step_count, progress=True, skip_initial_state_check=True)
+        print("Complete!")
+        self.sampler = sampler
+        self.locals = ["fb", "fwd"]
+        self.locals_ranges = [(0,1), (0,1)]
     
     ### --- ###
     def q_along_grid(self, p_model, fb, pcut,
@@ -477,9 +592,9 @@ class popsampler():
         working_catalogue = np.array(working_catalogue)
         return working_catalogue, soltypes
     
-    def assign_grids(self, working_catalogue, p_range, q_range, mass_binned=False, scale=5, verbose=True):
-        p_boundaries = np.linspace(*p_range, self.model_cube.shape[0]+1)[1:-1]
-        q_boundaries = np.linspace(*q_range, self.model_cube.shape[1]+1)[1:-1]
+    def assign_grids(self, target_shape, working_catalogue, p_range, q_range, mass_binned=False, scale=5, verbose=True):
+        p_boundaries = np.linspace(*p_range, target_shape[0]+1)[1:-1]
+        q_boundaries = np.linspace(*q_range, target_shape[1]+1)[1:-1]
         grids = np.array(compute_grids(working_catalogue, self.sc_cubes, p_boundaries, q_boundaries, 
                                        q_space=True, mass_binned=mass_binned, scale=scale, verbose=verbose))
         return grids
@@ -500,7 +615,7 @@ class popsampler():
         if grids is None:
             if verbose:
                 print("Computing grids...")
-            grids = self.assign_grids(working_catalogue, p_range, q_range, mass_binned=mass_binned, scale=scale, verbose=verbose)
+            grids = self.assign_grids(working_model_cube.shape, working_catalogue, p_range, q_range, mass_binned=mass_binned, scale=scale, verbose=verbose)
         
         if verbose:
             print("Computing likelihoods...")
@@ -514,7 +629,7 @@ class popsampler():
                 pbar.update(1)
 
         self.fbs = fbs
-        self.likelihoods = likelihoods
+        self.likelihood_set = likelihoods
         return fbs, likelihoods
     
     def binarity_precomputations(self, p_range=(1,8), q_range=(0.05,0.5)):
@@ -548,7 +663,7 @@ class popsampler():
             results: (fbs, likelihoods) tuple of lists of equal size corresponding
                 to the sampled binary fractions and their corresponding likelihoods
         '''
-        working_ls, working_fbs = self.likelihoods, self.fbs
+        working_ls, working_fbs = self.likelihood_set, self.fbs
         if results is not None:
             working_ls, working_fbs = results
         working_ls, working_fbs = np.array(working_ls), np.array(working_fbs)
@@ -573,6 +688,90 @@ class popsampler():
         if name is not None:
             plt.title(name)
         plt.show();
+        
+    ### --- ###
+    def chain(self, discard=25):
+        return self.sampler.get_chain(discard=discard, flat=True)
+    
+    ### --- ###
+    def likelihoods(self, discard=25):
+        return self.sampler.get_log_prob(discard=discard, flat=True)       
+    
+    ### --- ###
+    def apply_condition(self, condition, chain, likelihoods):
+        set_locals = {self.locals[i]:chain[:,i] for i in range(len(self.locals))}
+        set_locals["likelihood"] = likelihoods
+        ran_condition = eval(condition, set_locals)
+        
+        chain = chain[ran_condition]
+        total = len(likelihoods)
+        likelihoods = likelihoods[ran_condition]
+        if self.verbose:
+            print("{}/{} ({:.1f}%) of sampled points remain".format(len(likelihoods), total, len(likelihoods)/total*100))
+        
+        return chain, likelihoods
+    
+    ### --- ###
+    def plot_corner(self, condition=None, discard=25, full_prior=False, **kwargs):
+        chain, likelihoods = self.chain(discard=discard), self.likelihoods(discard=discard)
+        
+        if condition is not None:
+            chain, likelihoods = self.apply_condition(condition, chain, likelihoods)
+
+        ranges = [(param.min(), param.max()) if np.ptp(param) > 0 else (param[0]-1e-3, param[0]+1e-3) for param in chain.T]
+        
+        if full_prior:
+            ranges = self.locals_ranges
+
+        return corner.corner(chain, ranges=ranges, labels=self.locals, **kwargs);
+    
+    ### --- ###
+    def plot_2d(self, parameters, condition=None, truths=None, savedir=None, discard=25, full_prior=False, **kwargs):
+        chain, likelihoods = self.chain(discard=discard), self.likelihoods(discard=discard)
+        
+        if condition is not None:
+            chain, likelihoods = self.apply_condition(condition, chain, likelihoods)
+
+        check_indices = [self.locals.index(param) for param in parameters]
+
+        fig, ax = plt.subplots(1,1)
+        
+        cb = ax.scatter(chain[:,check_indices[0]], chain[:,check_indices[1]], c=likelihoods, cmap='viridis', norm=colors.Normalize(), **kwargs)
+        plt.colorbar(cb, label="log likelihood")
+        ax.set_xlabel(self.locals[check_indices[0]]);
+        ax.set_ylabel(self.locals[check_indices[1]]);
+        max_x, max_y = chain[:,check_indices[0]][np.argmax(likelihoods)], chain[:,check_indices[1]][np.argmax(likelihoods)]
+        ax.axvline(max_x, c="k", linestyle="--", label="highest likelihood");
+        ax.axhline(max_y, c="k", linestyle="--");
+        
+        if truths is not None:
+            ax.axvline(truths[0], c="r", linestyle="--", label="truth");
+            ax.axhline(truths[1], c="r", linestyle="--");
+
+        ax.legend()
+        
+        if full_prior:
+            ax.set_xlim(self.locals_ranges[self.locals[check_indices[0]]])
+            ax.set_ylim(self.locals_ranges[self.locals[check_indices[1]]])
+        
+        if savedir is not None:
+            plt.savefig(savedir)
+            
+        return fig
+    
+    ### --- ###
+    def plot_parameter(self, parameter, truth=None, condition=None, discard=25):
+        chain, likelihoods = self.chain(discard=discard), self.likelihoods(discard=discard)
+        
+        if condition is not None:
+            chain, likelihoods = self.apply_condition(condition, chain, likelihoods)
+        
+        check_index = list(self.locals).index(parameter)
+        
+        plt.plot(chain[:,check_index], color="maroon")
+        if truth is not None:
+            plt.axhline(y=truth, c="k", linestyle="--")
+        plt.title(parameter)
         
     ### --- ###
     def save_results(self, name, save_dir=None, note=None):          
