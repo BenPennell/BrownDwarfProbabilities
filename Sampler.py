@@ -14,6 +14,13 @@ except ImportError:
     # for terminal
     from tqdm import tqdm
 
+# to save on memory, make a global variable for the grids
+_global_grids = None
+
+def set_global_grids(grids):
+    global _global_grids
+    _global_grids = grids
+
 SOLUTION_TYPES = [0,5,7,9,12]
 ### --- ###
 def calculate_orbit_parameter(m, q, w):
@@ -327,9 +334,9 @@ def create_model_cube(grid_shape, p_model=None, q_model=0, pcut=None,
     q_count = grid_shape[1]
     q_vals = np.linspace(*q_range,q_count+1)
     q_dist = np.zeros(q_count)
-    total_area = area_in_range_powerlaw(q_range, q_model, resolution=period_count*10)
+    total_area = area_in_range_powerlaw(q_range, q_model, resolution=q_count*10)
     for i in range(q_count):
-        q_dist[i] = area_in_range_powerlaw((q_vals[i],q_vals[i+1]), q_model, resolution=period_count*10) / total_area
+        q_dist[i] = area_in_range_powerlaw((q_vals[i],q_vals[i+1]), q_model, resolution=q_count*10) / total_area
     
     # construct cube
     model_cube = np.outer(p_dist, q_dist)
@@ -418,7 +425,8 @@ def wd_within_prior(mcmc_params):
     return True
 
 ### --- ###
-def likelihood_wrapper(mcmc_params, soltypes, grids, grid_shape, p_model, pcut, cutoff):
+def likelihood_wrapper(mcmc_params, soltypes, grid_shape, p_model, pcut, cutoff):
+    global _global_grids
     if not within_prior(mcmc_params):
         return -np.inf
     fb = mcmc_params[0]
@@ -426,7 +434,7 @@ def likelihood_wrapper(mcmc_params, soltypes, grids, grid_shape, p_model, pcut, 
     q_model = mcmc_params[1]
 
     model_cube = create_model_cube(grid_shape, p_model=p_model, q_model=q_model, pcut=pcut)
-    return calculate_log_likelihood(fb, soltypes, grids, model_cube, cutoff=cutoff)
+    return calculate_log_likelihood(fb, soltypes, _global_grids, model_cube, cutoff=cutoff)
 
 ### --- ###
 def initialise_walkers(nwalkers):
@@ -437,15 +445,17 @@ def initialise_walkers(nwalkers):
     return initial_params
 
 ### --- ###
-def wd_likelihood_wrapper(mcmc_params, wd_params, soltypes, grids, grid_shape, p_model, q_model, pcut, cutoff):
+def wd_likelihood_wrapper(mcmc_params, wd_params, soltypes, grid_shape, p_model, q_model, pcut, cutoff):
+    global _global_grids
     if not wd_within_prior(mcmc_params):
         return -np.inf
     fb, fwd = mcmc_params
+    #fb = 0.6
 
     ms_model_cube = create_model_cube(grid_shape, p_model=p_model, q_model=q_model, pcut=pcut)
     wd_model_cube = wd_create_model_cube(grid_shape, *wd_params, p_model=p_model, pcut=pcut)
     model_cube = (1-fwd)*ms_model_cube + fwd*wd_model_cube
-    return calculate_log_likelihood(fb, soltypes, grids, model_cube, cutoff=cutoff)
+    return calculate_log_likelihood(fb, soltypes, _global_grids, model_cube, cutoff=cutoff)
 
 ### --- ###
 def wd_initialise_walkers(nwalkers):
@@ -526,11 +536,11 @@ class popsampler():
         
         # run mcmc
         print("Running markov chains...")
-        args = (wd_params, soltypes, grids, model_cube_shape, p_model, q_model, pcut, cutoff)
+        args = (wd_params, soltypes, model_cube_shape, p_model, q_model, pcut, cutoff)
         self.sampler = None
         ndim = 2 # fb, fwd
         initial_params = wd_initialise_walkers(nwalkers)
-        pool = multiprocessing.Pool()
+        pool = multiprocessing.Pool(initializer=set_global_grids, initargs=(grids,))
         sampler = emcee.EnsembleSampler(nwalkers, ndim, wd_likelihood_wrapper, args=args, pool=pool)
         sampler.run_mcmc(initial_params, step_count, progress=True, skip_initial_state_check=True)
         print("Complete!")
