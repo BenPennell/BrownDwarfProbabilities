@@ -6,6 +6,7 @@ import pickle
 import matplotlib.pyplot as plt
 from matplotlib import colors
 import corner
+from utils.utils import *
 
 try:
     # for Jupyter
@@ -22,80 +23,6 @@ def set_global_grids(grids):
     _global_grids = grids
 
 SOLUTION_TYPES = [0,5,7,9,12]
-### --- ###
-def calculate_orbit_parameter(m, q, w):
-    ''' This is lambda
-    '''
-    return q*w*m**(1/3)*(1 + q)**(-2/3)
-
-### --- ###
-def convert_binarity(fb, a):
-    return a / (a + 1/fb - 1)
-
-### --- ###
-def scale_resolution(arr, scale=2, axis=0, even=False):
-    '''
-        upscales grid resolution horizontally by splitting grid values evenly into multiple cells
-    '''
-    # Create a new shape with double the size along the specified axis
-    new_shape = list(arr.shape)
-    new_shape[axis] *= scale
-
-    # Expand the array along a new axis after the target one
-    expanded = np.expand_dims(arr, axis + 1)  # shape becomes (..., 1, ...)
-    
-    # Repeat the values along the new axis (splitting them evenly)
-    repeated = np.repeat(expanded, scale, axis=axis + 1)
-    if even:
-        repeated = repeated / scale
-
-    # Reshape back by merging the expanded axis with the original one
-    transposed = np.reshape(repeated, new_shape)
-
-    return transposed
-
-### --- ###
-def q_from_l(l, m, w):
-    '''
-        sort of a nightmare to disentangle the nonlinear q dependence
-        in lambda, this function solves it numerically if that's ever
-        needed
-    '''
-    z = m * (w / l)**3
-    # Coefficients of z q^3 - q^2 - 2q - 1 = 0
-    coeff = [z, -1.0, -2.0, -1.0]
-    roots = np.roots(coeff)
-    # real roots only
-    real_roots = roots[np.isreal(roots)].real
-    # choose the physically valid one: q > 0
-    valid = real_roots[real_roots > 0]
-    if len(valid) == 0:
-        return -1.0
-    # Usually only one positive root exists
-    return valid[0]
-
-### --- ###
-def q_from_l_vectorized(l_array, m, w):
-    '''
-        vectorised version of q_from_l()
-    '''
-    z = m * (w / l_array)**3
-
-    # coefficients for all cubics
-    coeffs = np.column_stack([z, -np.ones_like(z), -2*np.ones_like(z), -1*np.ones_like(z)])
-    roots = np.array([np.roots(c) for c in coeffs])  # shape (N, 3)
-
-    # real roots mask
-    real_roots = roots.real * np.isreal(roots)  # imaginary parts removed
-
-    # positive roots mask
-    positive_mask = real_roots > 0
-
-    # pick the first positive root (there should be exactly one)
-    q_vals = np.where(positive_mask.any(axis=1),
-                      real_roots[np.arange(len(real_roots)), positive_mask.argmax(axis=1)],
-                      -1.0)
-    return q_vals
 
 ### --- ###
 def rescale_period(cube, periods, period_boundaries, plim=(1,8)):
@@ -108,7 +35,7 @@ def rescale_period(cube, periods, period_boundaries, plim=(1,8)):
     # )
     
     # sum up the corresponding rows
-    reshaped_cube = np.zeros((len(period_boundaries) + 1, cube.shape[1]), dtype=cube.dtype)
+    reshaped_cube = np.zeros((len(period_boundaries)+1, cube.shape[1]), dtype=cube.dtype)
     np.add.at(reshaped_cube, bin_indices, cube)
     
     # we want the mean, so work out counts to divide by
@@ -139,10 +66,10 @@ def rescale_lambda(target_object, cube, lambdas, m2_boundaries,
     valid_idx = np.where(valid_mask)[0]
 
     # Bin companion masses
-    col_bins = np.searchsorted(m2_boundaries, companion_masses[valid_idx], side="right")
+    col_bins = np.searchsorted(m2_boundaries, companion_masses[valid_idx], side="left")
 
     # Output array
-    q_space_cube = np.zeros((cube.shape[0], len(m2_boundaries) + 1), dtype=cube.dtype)
+    q_space_cube = np.zeros((cube.shape[0], len(m2_boundaries)+1), dtype=cube.dtype)
 
     # Add contributions column-wise
     np.add.at(q_space_cube, (slice(None), col_bins), cube[:, valid_idx])
@@ -177,7 +104,7 @@ def rescale_lambda_to_q(target_object, cube, lambdas, q_boundaries,
     valid_idx = np.where(valid_mask)[0]
 
     # Bin companion masses
-    col_bins = np.searchsorted(q_boundaries, mass_ratios[valid_idx], side="right")
+    col_bins = np.searchsorted(q_boundaries, mass_ratios[valid_idx], side="left")
 
     # Output array
     q_space_cube = np.zeros((cube.shape[0], len(q_boundaries) + 1), dtype=cube.dtype)
@@ -205,7 +132,6 @@ def compute_grid(target_object, sc_cubes, period_boundaries, m_boundaries, q_spa
     marg_counts = sc_cubes["meta"]["shape"][-1]
     
     plx_index = np.argmin(abs(sc_cubes["meta"]["parallaxes"] - target_object["parallax"]))
-    reference_plx = sc_cubes["meta"]["parallaxes"][plx_index]
     
     # choose the right precomputed grid, with the right solution type
     if mass_binned:
@@ -213,29 +139,157 @@ def compute_grid(target_object, sc_cubes, period_boundaries, m_boundaries, q_spa
             mass_index = np.argmin(abs(np.array(sc_cubes["meta"]["reference_masses"]) - target_object["mass"]))
         else:
             mass_index = target_object["mass_index"]
-        reference_mass = sc_cubes["meta"]["reference_masses"][mass_index]
-        working_cube = sc_cubes["data"][reference_mass][reference_plx][:,:,target_object["soltype_index"]]/marg_counts
+        working_cube = sc_cubes["data"][mass_index][plx_index][:,:,target_object["soltype_index"]]/marg_counts
         grid_lambdas = sc_cubes["meta"]["lambdas"][mass_index][plx_index]
     else:
-        working_cube = sc_cubes["data"][reference_plx][:,:,target_object["soltype_index"]]/marg_counts
+        working_cube = sc_cubes["data"][plx_index][:,:,target_object["soltype_index"]]/marg_counts
         grid_lambdas = sc_cubes["meta"]["lambdas"][plx_index]
     
     working_cube = scale_resolution(working_cube, scale=scale, axis=1)
-    working_lambdas = np.linspace((grid_lambdas**(1/4))[0], (grid_lambdas**(1/4))[-1], scale*len(grid_lambdas))**4
+    working_lambdas = np.linspace((grid_lambdas**(1/4))[0], (grid_lambdas**(1/4))[-1], scale*(len(grid_lambdas)-1)+1)**4
+    lambda_centers = working_lambdas[:-1] + (working_lambdas[1:]-working_lambdas[:-1])/2
     
     # scale it down to the right period binning
-    period_scaled_cube = rescale_period(working_cube, np.log10(sc_cubes["meta"]["periods"]), period_boundaries, plim=plim)
+    working_periods = np.log10(sc_cubes["meta"]["periods"])
+    period_centers = working_periods[:-1] + (working_periods[1:]-working_periods[:-1])/2
+    period_scaled_cube = rescale_period(working_cube, period_centers, period_boundaries, plim=plim)
     
     # and scale it to the working companion mass
     rescale_mass_coordinate = rescale_lambda
     if q_space:
         rescale_mass_coordinate = rescale_lambda_to_q
-    fully_rescaled_cube = rescale_mass_coordinate(target_object, period_scaled_cube, working_lambdas, m_boundaries, save_cols=save_cols)
+    fully_rescaled_cube = rescale_mass_coordinate(target_object, period_scaled_cube, lambda_centers, m_boundaries, save_cols=save_cols)
     
     return fully_rescaled_cube
-        
+
 ### --- ###
-def compute_grids(objects, sc_cubes, period_boundaries, m_boundaries, q_space=True, mass_binned=False, verbose=True, scale=5, plim=(1,8)):
+def full_rescale_lambda_to_q(target_object, cube, lambdas, q_boundaries,
+                       m2lim=(0.017, 0.2), qlim=(0.05, 0.5), save_cols=True):
+
+    # cube shape: (P, L, S)
+    P, L, S = cube.shape
+
+    mass = target_object["mass"]
+    mass_ratios = q_from_l_vectorized(lambdas, mass, target_object["parallax"])  # (L,)
+
+    valid_mask = (mass_ratios > 0)
+    valid_idx = np.where(valid_mask)[0]
+
+    # bin indices for valid lambda points
+    col_bins = np.searchsorted(q_boundaries, mass_ratios[valid_idx], side="left")  # (Nv,)
+
+    # output: (P, Q, S)
+    Q = len(q_boundaries) + 1
+    q_space_cube = np.zeros((P, Q, S), dtype=cube.dtype)
+
+    # accumulate
+    # cube[:, valid_idx, :] → (P, Nv, S)
+    np.add.at(q_space_cube, (slice(None), col_bins, slice(None)), cube[:, valid_idx, :])
+
+    # counts per bin
+    counts = np.bincount(col_bins, minlength=Q)
+    mask = counts > 0
+
+    # divide (broadcast over P and S)
+    q_space_cube[:, mask, :] /= counts[mask][None, :, None]
+
+    if save_cols:
+        valid_cols = np.where(counts > 0)[0]
+        if len(valid_cols) > 0:
+            last_valid = valid_cols[-1]
+
+            # check if last column is empty
+            if np.all(q_space_cube[:, -1, :] == 0):
+                q_space_cube[:, last_valid+1:, :] = q_space_cube[:, last_valid:last_valid+1, :]
+
+    return q_space_cube
+
+### --- ###
+def full_rescale_period(cube, periods, period_boundaries, plim=(1, 8)):
+    # cube: (P, L, S)
+    P, L, S = cube.shape
+
+    bin_indices = np.searchsorted(period_boundaries, periods, side="right")  # (P,)
+
+    # output: (P_new, L, S)
+    P_new = len(period_boundaries) + 1
+    reshaped_cube = np.zeros((P_new, L, S), dtype=cube.dtype)
+
+    # accumulate across period axis
+    np.add.at(reshaped_cube, (bin_indices, slice(None), slice(None)), cube)
+
+    # counts per bin
+    counts = np.bincount(bin_indices, minlength=P_new)
+    mask = counts > 0
+
+    reshaped_cube[mask, :, :] /= counts[mask, None, None]
+
+    return reshaped_cube
+
+### --- ###
+def compute_grid_all_soltypes(target_object, sc_cubes, period_boundaries, m_boundaries,
+                              q_space=True, mass_binned=False, use_mass_index=True,
+                              scale=5, plim=(1, 8), save_cols=True):
+    # the cube is stored with counts from the marginalisation
+    marg_counts = sc_cubes["meta"]["shape"][-1]
+
+    plx_index = np.argmin(abs(sc_cubes["meta"]["parallaxes"] - target_object["parallax"]))
+
+    # choose the right precomputed grid
+    if mass_binned:
+        if not use_mass_index:
+            mass_index = np.argmin(
+                abs(np.array(sc_cubes["meta"]["reference_masses"]) - target_object["mass"])
+            )
+        else:
+            mass_index = target_object["mass_index"]
+
+        # keep ALL soltypes (no indexing on last axis)
+        working_cube = sc_cubes["data"][mass_index][plx_index] / marg_counts
+        grid_lambdas = sc_cubes["meta"]["lambdas"][mass_index][plx_index]
+    else:
+        working_cube = sc_cubes["data"][plx_index] / marg_counts
+        grid_lambdas = sc_cubes["meta"]["lambdas"][plx_index]
+
+    # working_cube shape is now: (period, lambda, soltype)
+
+    # scale lambda resolution (axis=1 still correct)
+    working_cube = scale_resolution(working_cube, scale=scale, axis=1)
+
+    working_lambdas = np.linspace(
+        (grid_lambdas**(1/4))[0],
+        (grid_lambdas**(1/4))[-1],
+        scale * (len(grid_lambdas) - 1) + 1
+    )**4
+
+    lambda_centers = working_lambdas[:-1] + (working_lambdas[1:] - working_lambdas[:-1]) / 2
+
+    # period scaling
+    working_periods = np.log10(sc_cubes["meta"]["periods"])
+    period_centers = working_periods[:-1] + (working_periods[1:] - working_periods[:-1]) / 2
+
+    # IMPORTANT: rescale_period must support extra trailing dimension
+    period_scaled_cube = full_rescale_period(
+        working_cube, period_centers, period_boundaries, plim=plim
+    )
+
+    # choose mass coordinate transform
+    rescale_mass_coordinate = full_rescale_lambda_to_q if q_space else rescale_lambda
+
+    # IMPORTANT: this function must also support broadcasting over soltype axis
+    fully_rescaled_cube = rescale_mass_coordinate(
+        target_object,
+        period_scaled_cube,
+        lambda_centers,
+        m_boundaries,
+        save_cols=save_cols
+    )
+
+    return fully_rescaled_cube
+
+### --- ###
+def compute_grids(objects, sc_cubes, period_boundaries, m_boundaries, 
+                  q_space=True, mass_binned=False, verbose=True, scale=5, plim=(1,8), all=False):
     '''
         wrapper for compute_grid() (above)
     '''
@@ -245,64 +299,17 @@ def compute_grids(objects, sc_cubes, period_boundaries, m_boundaries, q_space=Tr
     # then, map it into m2-space, trimming the irrelevant m2s
     if verbose:
         pbar = tqdm(total=len(objects))
+    ufunc = compute_grid
+    if all:
+        ufunc = compute_grid_all_soltypes
     for target_object in objects:
-        fully_rescaled_cube = compute_grid(target_object, sc_cubes, period_boundaries, m_boundaries, 
+        fully_rescaled_cube = ufunc(target_object, sc_cubes, period_boundaries, m_boundaries, 
                                            q_space=q_space, mass_binned=mass_binned, scale=scale, plim=plim)
         grids.append(fully_rescaled_cube.ravel())
         if verbose:
             pbar.update(1)
     
-    return grids   
-
-### --- ###
-def gaussian(x, mu, sigma):
-    '''
-        this function evaluates a normalised gaussian at x, defined by two
-        parameters: peak (mu) and width (sigma)
-    '''
-    return np.exp(-(mu - x)**2/(2*sigma**2)) / np.sqrt(2 * np.pi * sigma**2)
-
-### --- ###
-def area_in_range(target_range, mu, sigma, resolution=100):
-    xs = np.linspace(*target_range, resolution)
-    ys = gaussian(xs, mu, sigma)
-    return np.trapezoid(y=ys, x=xs)
-
-### --- ###
-def pexp(val, index, val_range=(0, 1), ignore_a=False):
-    '''
-        normalised power law probability
-    '''
-    a = 1
-    if not ignore_a:
-        a = (index + 1) / (val_range[1] ** (index + 1) - val_range[0] ** (index + 1))
-    return a * (val ** index)
-
-### -- ###
-def area_in_range_powerlaw(target_range, index, resolution=100):
-    xs = np.linspace(*target_range, resolution)
-    ys = pexp(xs, index, ignore_a=True)
-    return np.trapezoid(y=ys, x=xs)
-
-### --- ###
-def cutoff_to_fraction(p_model, pcut):
-    p_mu, p_si = p_model
-    total_area = area_in_range((1,pcut), p_mu, p_si, resolution=100)
-    observable_area = area_in_range((2,3), p_mu, p_si, resolution=100)
-    return observable_area / total_area
-
-### --- ###
-def fraction_to_cutoff(p_model, fraction):
-    p_mu, p_si = p_model
-    observable_area = area_in_range((2,3), p_mu, p_si, resolution=100)
-    target_area = observable_area / fraction
-    # search for cutoff
-    pcut_vals = np.linspace(3,8,1000)
-    for pcut in pcut_vals:
-        total_area = area_in_range((1,pcut), p_mu, p_si, resolution=100)
-        if total_area >= target_area:
-            return pcut
-    return 8.0
+    return np.array(grids)   
 
 ### --- ###
 def create_model_cube(grid_shape, p_model=None, q_model=0, pcut=None,
@@ -394,15 +401,31 @@ def wd_create_model_cube(grid_shape, m_rg, a, b, d, alpha,
 ### --- WD template --- ###
 ### ------------------- ###
 
-def calculate_log_likelihood(fb, soltypes, grids, model_cube, cutoff=np.exp(-18)): 
+### --- ###
+def calculate_log_likelihood(fb, soltypes, grids, model_cube, cutoff=np.exp(-30)): 
     # compute individual solution chance
     dot_values = fb * np.dot(grids, model_cube.ravel())
 
     # For solution_type == 0, add single star component (1 - fb)
     dot_values[soltypes == 0] += (1 - fb)
-
+    
     # Apply cutoff and sum log-likelihoods
-    return np.sum(np.log(np.maximum(dot_values, cutoff)))
+    return np.sum(np.log(np.maximum(dot_values, cutoff))) 
+
+### --- ###
+def expected_counts(fb, grids, model_cube): 
+    ravelled_model_cube = model_cube.ravel()
+    
+    grids = grids.reshape((len(grids), len(ravelled_model_cube), 5)) # (#objects, grid_size, 5)
+    grids = np.swapaxes(grids, 1, 2)
+    
+    dot_values = fb * np.dot(grids, ravelled_model_cube) # (#objects, 5)
+
+    # For solution_type == 0, add single star component (1 - fb)
+    dot_values[:,0] += (1 - fb)
+    
+    # Apply cutoff and sum log-likelihoods
+    return dot_values #np.sum(dot_values, axis=0)
 
 ### --- ###
 def within_prior(mcmc_params):
@@ -455,6 +478,7 @@ def wd_likelihood_wrapper(mcmc_params, wd_params, soltypes, grid_shape, p_model,
     ms_model_cube = create_model_cube(grid_shape, p_model=p_model, q_model=q_model, pcut=pcut)
     wd_model_cube = wd_create_model_cube(grid_shape, *wd_params, p_model=p_model, pcut=pcut)
     model_cube = (1-fwd)*ms_model_cube + fwd*wd_model_cube
+    model_cube = model_cube / np.sum(model_cube)
     return calculate_log_likelihood(fb, soltypes, _global_grids, model_cube, cutoff=cutoff)
 
 ### --- ###
@@ -493,7 +517,7 @@ class popsampler():
 
     ### --- ###
     def constrain_parameters(self, p_model, pcut=(1,8), model_cube_shape=(35,25), step_count=1000, nwalkers=7,
-                             p_range=(1,8), q_range=(0.05,0.5), cutoff=np.exp(-18), 
+                             p_range=(1,8), q_range=(0.05,0.5), cutoff=np.exp(-30), 
                             grids=None, catalogue=None, mass_binned=False, scale=5, verbose=True):
         if verbose:
             print("Reducing catalogue...")
@@ -522,7 +546,7 @@ class popsampler():
         
     ### --- ###
     def wd_constrain_parameters(self, wd_params, model_cube_shape=(35,25), p_model=(4, 1.3), q_model=0, pcut=(2,8), step_count=1000, nwalkers=5,
-                             p_range=(1,8), q_range=(0.05,0.5), cutoff=np.exp(-18), 
+                             p_range=(1,8), q_range=(0.05,0.5), cutoff=np.exp(-30), 
                             grids=None, catalogue=None, mass_binned=False, scale=5, verbose=True):
         if verbose:
             print("Reducing catalogue...")
@@ -550,7 +574,7 @@ class popsampler():
     
     ### --- ###
     def q_along_grid(self, p_model, fb, pcut,
-                             p_range=(1,8), q_range=(0.05,0.5), cutoff=np.exp(-18), 
+                             p_range=(1,8), q_range=(0.05,0.5), cutoff=np.exp(-30), 
                             grids=None, catalogue=None, model_cube=None, mass_binned=False, scale=5, verbose=True):
         temp_kwargs = dict()
         temp_kwargs["cutoff"] = cutoff
@@ -591,6 +615,7 @@ class popsampler():
             reduced_object = {
                 "parallax": target_object["parallax"],
                 "mass": target_object["mass"],
+                "phot_g_mean_mag": target_object["phot_g_mean_mag"],
                 "soltype_index": SOLUTION_TYPES.index(target_object["solution_type"])
             }
             if mass_binned:
@@ -609,7 +634,7 @@ class popsampler():
                                        q_space=True, mass_binned=mass_binned, scale=scale, verbose=verbose))
         return grids
     
-    def binarity(self, resolution=250, p_range=(1,8), q_range=(0.05,0.5), cutoff=np.exp(-18), 
+    def binarity(self, resolution=250, p_range=(1,8), q_range=(0.05,0.5), cutoff=np.exp(-30), 
                  grids=None, catalogue=None, model_cube=None, mass_binned=False, scale=5, verbose=True):
         '''
             binarity likelihood across fb
@@ -618,9 +643,13 @@ class popsampler():
             print("Reducing catalogue...")
         working_catalogue, soltypes = self.reduce_catalogue(catalogue=catalogue, mass_binned=mass_binned)
         
+        #effective_volumes = np.array([relative_volume(working_catalogue[i]["phot_g_mean_mag"], working_catalogue[i]["parallax"]) for i in range(len(working_catalogue))])
+        #effective_volumes = generate_rolling_average(working_catalogue)
+        
         working_model_cube = self.model_cube
         if model_cube is not None:
             working_model_cube = model_cube
+            
         # precompute the q-L mappings for all the objects
         if grids is None:
             if verbose:
@@ -629,10 +658,10 @@ class popsampler():
         
         if verbose:
             print("Computing likelihoods...")
+            pbar = tqdm(total=resolution)
+            
         fbs = np.linspace(0.02,0.98,resolution)
         likelihoods = np.zeros(resolution)
-        if verbose:
-            pbar = tqdm(total=resolution)
         for i in range(resolution):
             likelihoods[i] = calculate_log_likelihood(fbs[i], soltypes, grids, working_model_cube, cutoff=cutoff)
             if verbose:
@@ -641,11 +670,6 @@ class popsampler():
         self.fbs = fbs
         self.likelihood_set = likelihoods
         return fbs, likelihoods
-    
-    def binarity_precomputations(self, p_range=(1,8), q_range=(0.05,0.5)):
-        working_catalogue, _ = self.reduce_catalogue()
-        grids = self.assign_grids(working_catalogue, p_range, q_range)
-        return working_catalogue, grids
         
     def binarity_binned_mass(self, model_cube, working_catalogue, grids, mass_lims, p_range=(1,8), q_range=(0.05,0.5), **kwargs):        
         constraining_results = np.zeros((len(mass_lims), 3))

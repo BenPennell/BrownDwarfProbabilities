@@ -16,14 +16,24 @@ warnings.filterwarnings(
 # =============================
 # Standard imports
 # =============================
+
+import sys
+import os
+import json
+
+with open("config.json") as f:
+    d = json.load(f)
+    
+folder_a_path = os.path.abspath(os.path.join(os.getcwd(), d["home"]))
+if folder_a_path not in sys.path:
+    sys.path.append(folder_a_path)
+    
 import numpy as np
 from functools import lru_cache
 from joblib import Parallel, delayed, parallel
 from contextlib import contextmanager
 from tqdm.auto import tqdm
-import json
-import sys
-import os
+from utils.utils import *
 
 # =============================
 # joblib + tqdm integration
@@ -51,51 +61,30 @@ def tqdm_joblib(tqdm_object):
 # Configuration / Imports
 # =============================
 
-with open("config.json") as f:
-    d = json.load(f)
+# folder_a_path = os.path.abspath(os.path.join(os.getcwd(), d["wrapperlitepath"]))
+# if folder_a_path not in sys.path:
+#     sys.path.append(folder_a_path)
 
-folder_a_path = os.path.abspath(os.path.join(os.getcwd(), d["wrapperlitepath"]))
-if folder_a_path not in sys.path:
-    sys.path.append(folder_a_path)
-
-import GaiamockWrapperLite as gw
+import utils.GaiamockWrapperLite as gw
 
 # =============================
-# Random utility functions
+# Functions for randomly setting orbital angles
 # =============================
 
 def random_angle(n=1):
     x = np.random.rand(n) * 2 * np.pi
     return float(x[0]) if n == 1 else x
 
-
 def random_inc(n=1):
     x = np.arccos(2 * np.random.rand(n) - 1)
     return float(x[0]) if n == 1 else x
-
 
 def random_Tp(n=1):
     x = np.random.rand(n) - 0.5
     return float(x[0]) if n == 1 else x
 
-
 # =============================
-# Distributions
-# =============================
-
-def gaussian(x, mu, sigma):
-    return np.exp(-(mu - x) ** 2 / (2 * sigma ** 2)) / np.sqrt(2 * np.pi * sigma ** 2)
-
-
-def pexp(val, exp, val_range=(0, 1), ignore_a=False):
-    a = 1
-    if not ignore_a:
-        a = (exp + 1) / (val_range[1] ** (exp + 1) - val_range[0] ** (exp + 1))
-    return a * (val ** exp)
-
-
-# =============================
-# Different distributions
+# period, mass ratio, and eccentricity distributions
 # =============================
 
 # eccentricities
@@ -117,17 +106,11 @@ turnover_params = (3.5, 1)
 turnover_pdf = gaussian(periods_grid, *turnover_params)
 turnover_weight = np.cumsum(turnover_pdf / np.sum(turnover_pdf))
 
-# =============================
-# Different models
-# =============================
-
 def circular_e(*args):
     return 0.0
 
-
 def thermal_e(*args):
     return np.interp(np.random.rand(), e_cdf, es)
-
 
 def turnover_e(logP):
     w = turnover_weight[np.argmin(np.abs(periods_grid - logP))]
@@ -135,14 +118,19 @@ def turnover_e(logP):
     cdf = np.cumsum(dist / np.sum(dist))
     return np.interp(np.random.rand(), cdf, es)
 
+def choose_value(cdf, grid, size):
+    u = np.random.uniform(cdf.min(), cdf.max(), size)
+    return np.interp(u, cdf, grid)
+
 # =============================
-# Gaia helpers
+# Cache the scanning law for all the object
+# Round the RA/Dec to a certain number of decimal places to reduce the number of unique positions
+# Significantly speeds things up
 # =============================
 
 c_funcs = gw.generate_cfuncs()
 
-_GOST_NDP = 5  # RA/Dec rounding
-
+_GOST_NDP = 3  # RA/Dec rounding
 
 @lru_cache(maxsize=None)
 def _get_gost_cached(ra_r, dec_r):
@@ -150,89 +138,109 @@ def _get_gost_cached(ra_r, dec_r):
         ra_r, dec_r, data_release="dr3"
     )
 
-
 def get_gost(ra, dec):
     return _get_gost_cached(
         round(float(ra), _GOST_NDP),
         round(float(dec), _GOST_NDP),
     )
 
-
-# =============================
-# Sampling helper
-# =============================
-
-def choose_value(cdf, grid, size):
-    u = np.random.uniform(cdf.min(), cdf.max(), size)
-    return np.interp(u, cdf, grid)
-
-
-# =============================
-# Parallel worker
-# =============================
-
-def solve_binary(
-    period, q, ecc, inc, w, omega, Tp,
-    ra, dec, pmra, pmdec, plx, mass, gmag
-):
-    t = get_gost(ra, dec)
-    return gw.rapid_solution_type(
-        period, q, plx, mass,
-        gmag, 1e-10, ecc,
-        inc, w, omega, Tp,
-        ra, dec, pmra, pmdec,
-        t, c_funcs
+def _get_gost_cached_mod(ra_r, dec_r):
+    return gw.gaiamock_mod.get_gost_one_position(
+        ra_r, dec_r, data_release="dr3"
     )
 
+def get_gost_mod(ra, dec):
+    return _get_gost_cached_mod(
+        round(float(ra), _GOST_NDP),
+        round(float(dec), _GOST_NDP),
+    )
+
+# =============================
+# Function for fetching the scanning law and getting the solution type for a source
+# =============================
+
+def solve_binary(period, q, ecc, inc, w, omega, Tp,
+                ra, dec, pmra, pmdec, plx, mass, gmag, return_ruwe=False, return_fits=False):
+    t = get_gost(ra, dec)
+    t_mod = get_gost_mod(ra, dec)
+    return gw.rapid_solution_type(period, q, plx, mass,
+                                    gmag, 1e-10, ecc,
+                                    inc, w, omega, Tp,
+                                    ra, dec, pmra, pmdec,
+                                    t, t_mod, c_funcs, return_ruwe=return_ruwe, return_fits=return_fits)
+    
+def solve_single(ra, dec, pmra, pmdec, plx, gmag):
+    t = get_gost_mod(ra, dec)
+    return gw.rapid_single_star(ra, dec, pmra, pmdec, plx, gmag, t)
 
 # =============================
 # Main generator
 # =============================
 
-def create_synthetic_data(
-    object_count,
-    catalogue,
-    binary_fraction=None,
-    binarity_model=None,
-    mass_model=None,
-    period_model=None,
-    ecc_type="circular",
-    m_lim=(0.017, 0.2),
-    p_lim=(1, 8),
-    p_resolution=100,
-    verbose=True,
-    n_jobs=-1,
-    g=None
-):
+def create_synthetic_data(object_count, catalogue,
+                        binary_fraction=None, binarity_model=None, mass_model=None, period_model=None, ecc_type="circular",
+                        m_lim=(0.013, 0.2), q_lim=(0.05, 0.5), p_lim=(1, 8), p_resolution=100, return_ruwe=False, return_fits=False,
+                        save_bprp=True, verbose=True, n_jobs=-1):
+    
+    '''
+    Create a synthetic dataset of Gaia-like objects, with a specified fraction of binaries and various models for the binary parameters.
+    Parameters:
+        - object_count: total number of objects to generate
+        - catalogue: Ideally an astropy table containing the properties of the objects to sample from (must include ra, dec, pmra, pmdec, parallax, mass_single, phot_g_mean_mag, and optionally bp_rp)
+            Should be something that can be indexed like `catalogue["ra"]` to extract all right ascensions
+        - binary_fraction: if not None, the fixed fraction of objects that are binaries (overrides binarity_model)
+        - binarity_model: a function that takes an array of masses and returns an array of probabilities of being binary (if binary_fraction is None)  
+            Use this if you want some kind of mass-dependent binary fraction or whatever.  
+        - mass_model: a parameter for the mass ratio distribution (power law exponent). If None, you get a flat distribution
+        - period_model: a tuple (mu, sigma) for a Gaussian distribution of log(period). if None, you get a flat distribution
+        - ecc_type: one of "circular", "thermal", or "turnover" to specify the eccentricity distribution
+        - m_lim: tuple (m_min, m_max) specifying the allowed range of secondary masses (in solar masses)
+        - q_lim: tuple (q_min, q_max) specifying the allowed range of mass ratios (m2/m1)
+        - p_lim: tuple (p_min, p_max) specifying the allowed range of log(period) (in days)
+        - p_resolution: number of points to use in the period grid if period_model is specified. You don't need to change this.
+        - save_bprp: whether to include the bp_rp color in the output (if available in the catalogue). Defaults to True.
+        - verbose: whether to show a progress bar during the binary solving step
+        - n_jobs: number of parallel jobs to use for solving
 
-    ecc_func = {
-        "circular": circular_e,
-        "thermal": thermal_e,
-        "turnover": turnover_e,
-    }.get(ecc_type, circular_e)
+    Returns:
+        A numpy array of length object_count, where each element is a dictionary containing the properties of the object, including the binary parameters if it is a binary.
+        Each object gets the field "is_binary" which is True for binaries and False for singles, and "solution_type" which is 0,5,7,9, or 12.
+    '''
 
-    # --- select catalogue rows ---
-    idx = np.random.choice(len(catalogue), object_count)
+    # choose which of the three eccentricity functions is called for
+    ecc_func = {"circular": circular_e, "thermal": thermal_e, "turnover": turnover_e,}.get(ecc_type, circular_e)
 
-    ra = catalogue["ra"][idx].astype(float)
-    dec = catalogue["dec"][idx].astype(float)
-    pmra = catalogue["pmra"][idx].astype(float)
-    pmdec = catalogue["pmdec"][idx].astype(float)
-    plx = catalogue["parallax"][idx].astype(float)
-    mass = catalogue["mass_single"][idx].astype(float)
-    if g is None:
-        gmag = catalogue["phot_g_mean_mag"][idx].astype(float)
-    else:
-        gmag = np.ones(object_count)*g # constant magnitude
-    bprp = catalogue["bp_rp"][idx].astype(float)
-
+    def flat_q(count):
+        return np.random.uniform(*q_lim, count)
+    q_func = flat_q
+    # if a mass ratio distribution is called for (power law), set up the function
     if mass_model is not None:
-        qs = np.linspace(0.05, 0.5, 1000)
+        qs = np.linspace(*q_lim, 1000)
         q_pdf = pexp(qs, mass_model)
         q_cdf = np.cumsum(q_pdf / np.sum(q_pdf))
         def exponential_q(count):
             return np.array([np.interp(np.random.rand(), q_cdf, qs) for _ in range(count)])   
-         
+        q_func = exponential_q
+        
+    # --- select catalogue rows ---
+    # weight by volume coverage
+    # for the less complete ones, we want more objects corresponding to the relative enclosed volume
+    # areas = np.array([relative_volume(catalogue[i]["phot_g_mean_mag"], catalogue[i]["parallax"]) for i in range(len(catalogue))])
+    # idx = np.random.choice(len(catalogue), object_count, p=1/areas/np.sum(1/areas)) # normalised probability is the inverse of the covered area
+
+    # randomly select objects from the catalogue
+    idx = np.random.choice(len(catalogue), object_count, replace=True)
+    ra = catalogue["ra"][idx].astype(float)
+    dec = catalogue["dec"][idx].astype(float)
+    pmra = catalogue["pmra"][idx].astype(float)
+    pmdec = catalogue["pmdec"][idx].astype(float)
+    mass = catalogue["mass_single"][idx].astype(float)
+    plx = catalogue["parallax"][idx].astype(float)
+    gmag = catalogue["phot_g_mean_mag"][idx].astype(float)
+    if save_bprp:
+        bprp = catalogue["bp_rp"][idx].astype(float)
+    
+    # choose some amount of objects to be binaries
     # --- binary mask ---
     if binary_fraction is not None:
         p_bin = np.full(object_count, binary_fraction, dtype=float)
@@ -242,6 +250,8 @@ def create_synthetic_data(
         
     bin_idx = np.where(binary_mask)[0]
     nb = len(bin_idx)
+    sin_idx = np.where(np.invert(binary_mask))[0]
+    ns = len(sin_idx)
 
     # --- periods ---
     if period_model is not None:
@@ -256,21 +266,20 @@ def create_synthetic_data(
     period = 10 ** logP
 
     # --- mass ratios ---
-    if mass_model is None:
-        q = np.random.uniform(0.05, 0.5, nb)
-    else:
-        q = exponential_q(nb)
+    # randomly select mass ratios, and then keep resampling
+    # until they fall into the restricted range 
+    q = q_func(nb)
     m2 = q * mass[bin_idx]
     bad = (m2 < m_lim[0]) | (m2 > m_lim[1])
     while np.any(bad):
-        if mass_model is None:
-            q[bad] = np.random.uniform(0.05, 0.5, bad.sum())
-        else:
-            q[bad] = exponential_q(bad.sum())
+        q[bad] = q_func(bad.sum())
         m2[bad] = q[bad] * mass[bin_idx][bad]
         bad = (m2 < m_lim[0]) | (m2 > m_lim[1])
 
+    # --- eccentricities ---
     ecc = np.array([ecc_func(lp) for lp in logP])
+    
+    # --- orbital angles ---
     inc = random_inc(nb)
     w = random_angle(nb)
     omega = random_angle(nb)
@@ -281,6 +290,17 @@ def create_synthetic_data(
     # =============================
 
     if verbose:
+        pbar = tqdm(total=ns, desc="Computing Singles")
+
+    with tqdm_joblib(pbar if verbose else tqdm(disable=True)):
+        results_single = Parallel(
+            n_jobs=n_jobs,
+            backend="loky"
+        )(
+            delayed(solve_single)(ra[i], dec[i], pmra[i], pmdec[i], plx[i], gmag[i]) for i in sin_idx
+        )
+
+    if verbose:
         pbar = tqdm(total=nb, desc="Computing Binaries")
 
     with tqdm_joblib(pbar if verbose else tqdm(disable=True)):
@@ -288,11 +308,9 @@ def create_synthetic_data(
             n_jobs=n_jobs,
             backend="loky"
         )(
-            delayed(solve_binary)(
-                period[b], q[b], ecc[b], inc[b], w[b], omega[b], Tp[b],
-                ra[i], dec[i], pmra[i], pmdec[i],
-                plx[i], mass[i], gmag[i]
-            )
+            delayed(solve_binary)(period[b], q[b], ecc[b], inc[b], w[b], omega[b], Tp[b],
+                                ra[i], dec[i], pmra[i], pmdec[i],
+                                plx[i], mass[i], gmag[i], return_ruwe=return_ruwe, return_fits=return_fits)
             for b, i in enumerate(bin_idx)
         )
 
@@ -302,6 +320,7 @@ def create_synthetic_data(
 
     outdata = []
     b = 0
+    s = 0
     for i in range(object_count):
         out = {
             "ra": ra[i],
@@ -311,11 +330,12 @@ def create_synthetic_data(
             "parallax": plx[i],
             "mass": mass[i],
             "phot_g_mean_mag": gmag[i],
-            "bp_rp": bprp[i],
             "is_binary": bool(binary_mask[i]),
             "solution_type": 0,
         }
-
+        if save_bprp:
+            out["bp_rp"] = bprp[i]
+            
         if binary_mask[i]:
             out.update({
                 "period": period[b],
@@ -326,10 +346,32 @@ def create_synthetic_data(
                 "w": w[b],
                 "omega": omega[b],
                 "Tp": Tp[b],
-                "solution_type": results[b],
             })
+            if not return_fits and not return_ruwe:
+                out["solution_type"] = results[b]
+            elif return_fits and not return_ruwe:
+                if results[b] in [0,5,7,9]:
+                    out["solution_type"] = results[b]
+                else:
+                    out["solution_type"] = results[b][0]
+                    out["p0"] = results[b][1]
+            elif return_ruwe and not return_fits:
+                out["solution_type"] = results[b][0]
+                out["ruwe"] = results[b][1]
+            else:
+                if results[b] in [0,5,7,9]:
+                    out["solution_type"] = results[b][0]
+                    out["ruwe"] = results[b][1]
+                else:
+                    out["solution_type"] = results[b][0]
+                    out["ruwe"] = results[b][1]
+                    out["p0"] = results[b][2]
             b += 1
-
+        else:
+            if return_ruwe:
+                out["ruwe"] = results_single[s]
+                s += 1
+            
         outdata.append(out)
 
     return np.array(outdata)
