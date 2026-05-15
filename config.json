@@ -1,7 +1,6 @@
 {
-    "gaiamock_path": "../BHPopulation/gaiamock",
+    "home": "/home/bepennell/research/AstrometricSignalProcessing",
+    "gaiamock_path": "/home/bepennell/research/BHPopulation/gaiamock",
     "data_path": "./data",
-    "temp_path": "./temp",
-    "wrapperlitepath": "../GaiamockWrapper/utils",
-    "home": "/home/bepennell/research/BrownDwarfProbabilities"
+    "temp_path": "./temp"
 }
