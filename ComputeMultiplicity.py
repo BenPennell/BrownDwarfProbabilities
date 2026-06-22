@@ -99,29 +99,44 @@ def rescale_lambda_to_q(target_object, cube, grid_lambdas, q_boundaries, column_
     # get the total area that went in to each bin, to be divided out at the end
     weight_sums = np.bincount(col_bins, weights=column_areas[valid_idx], minlength=q_space_cube.shape[1])
     
-    # Since this is not a probability density, we don't want the "total probability" of being in a particular grid point
-    # instead, this cube is asking what is the probability that a particular grid point corresponds to a particular solution type
-    # for that reason, we average over the columns
-    # this is to account for the chance taht two columns in l-space which have different probabilities are mapped to the same column in q-space
-    # so, the new probabilities in that q-space column should be the average of the two
-    # and, it should be the weighted average of the columns. We already added them up scaled by the area, and then we should divide by that total area
-    # this achieves the desired weighted-average effect
-    mask_nonempty = weight_sums > 0
-    q_space_cube[:, mask_nonempty] /= weight_sums[mask_nonempty][None, :] # divide out by the cound of lambda-columns
-    
-    # Finally: if there is no lambda columns corresponding to the highest q-space columns,
+    # If there is no lambda columns corresponding to the highest q-space columns,
     # this was just a problem in the precomputing, we didn't make the grid wide enough.
     # In this case, if the highest q-columns are zero (which they should never be), we can
     # fill from the last valid column, since the probabilities are monotonic in q and are 
     # quite flat at the highest mass ratios. This is an okay approximation, especially
     # since this should only come up for a few objects which conspire to be super close+massive
-    if save_cols:
-        last_valid = None
-        for i in range(q_space_cube.shape[1]):
-            if weight_sums[i] > 0:
-                last_valid = i
-            elif last_valid is not None:
-                q_space_cube[:, i] = q_space_cube[:, last_valid]
+    # if save_cols:
+    #     # back fill
+    #     last_valid = None
+    #     last_weight = None
+    #     for i in range(q_space_cube.shape[1]):
+    #         if weight_sums[i] > 0:
+    #             last_valid = i
+    #             last_weight = weight_sums[i]
+    #         elif last_valid is not None:
+    #             q_space_cube[:, i] = q_space_cube[:, last_valid]
+    #             weight_sums[i] = last_weight
+        
+    #     # front fill
+    #     last_valid = None
+    #     last_weight = None
+    #     for i in np.arange(q_space_cube.shape[1]-1,-1,-1):
+    #         if weight_sums[i] > 0:
+    #             last_valid = i
+    #             last_weight = weight_sums[i]
+    #         elif last_valid is not None:
+    #             q_space_cube[:, i] = q_space_cube[:, last_valid]
+    #             weight_sums[i] = last_weight
+                
+    # Since this is not a probability density, we don't want the "total probability" of being in a particular grid point
+    # instead, this cube is asking what is the probability that a particular grid point corresponds to a particular solution type
+    # for that reason, we average over the columns
+    # this is to account for the chance that two columns in l-space which have different probabilities are mapped to the same column in q-space
+    # so, the new probabilities in that q-space column should be the average of the two
+    # and, it should be the weighted average of the columns. We already added them up scaled by the area, and then we should divide by that total area
+    # this achieves the desired weighted-average effect
+    mask_nonempty = weight_sums > 0
+    q_space_cube[:, mask_nonempty] /= weight_sums[mask_nonempty][None, :] # divide out by the count of lambda-columns
     
     return q_space_cube
 
@@ -289,8 +304,8 @@ def fisher_uncertainty(likelihoods):
     sigma = 1 / np.sqrt(-second_derivative)
     return sigma
 
-def multiplicity(catalogue, model_cube, sc_cube, resolution=1000, p_range=(1,8), q_range=(0.05,0.5), 
-                 cutoff=np.exp(-30), grids=None, scale=5, verbose=True, combine_higher_order=False):
+def multiplicity(catalogue, model_cube, sc_cube, masked_model_cubes=None, grids=None, resolution=1000, p_range=(1,8), q_range=(0.05,0.5), 
+                 cutoff=np.exp(-30), scale=5, verbose=True, combine_higher_order=False):
     '''
         Likelihood for all binary fractions for a given choice of model on a given set of objects
         
@@ -308,7 +323,8 @@ def multiplicity(catalogue, model_cube, sc_cube, resolution=1000, p_range=(1,8),
                                         scale=scale, verbose=verbose, combine_higher_order=combine_higher_order))
     
     # precompute the model cube for each object, masked and renormalized according to their maximum mass ratio
-    masked_model_cubes = mask_and_renormalize_model_cube(model_cube, catalogue, np.linspace(*q_range, model_cube.shape[1]+1))
+    if masked_model_cubes is None:
+        masked_model_cubes = mask_and_renormalize_model_cube(model_cube, catalogue, np.linspace(*q_range, model_cube.shape[1]+1))
     
     # compute the likelihood for each binary fraction
     fbs = np.linspace(0.02,0.98,resolution)
